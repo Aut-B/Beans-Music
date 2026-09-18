@@ -1210,6 +1210,8 @@ struct SettingsView: View {
     @State private var showRestoreConfirm = false
     @State private var showSourceManager = false
     @State private var showPluginManager = false
+    /// 首选音源（pyncmd）设置面板
+    @State private var showPreferredSource = false
     /// 本机歌单的 WebDAV 同步设置
     @State private var showWebDAVSync = false
     @State private var showEqualizer = false
@@ -1545,6 +1547,10 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $showWebDAVSync) {
             WebDAVSettingsView()
+                .environmentObject(theme)
+        }
+        .sheet(isPresented: $showPreferredSource) {
+            PreferredSourceSettingsView()
                 .environmentObject(theme)
         }
         .sheet(isPresented: $showEqualizer) {
@@ -2466,6 +2472,35 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "square.and.pencil")
                         Text(beansLocalized("管理 / 导入音源", "Manage / Import Sources"))
+                    }
+                    .font(BeansFont.appFont(13, .semibold))
+                    .foregroundStyle(Color.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.black, in: Capsule())
+                }
+                .buttonStyle(GlassPressButtonStyle(scale: 0.97))
+
+                HStack(spacing: 10) {
+                    Image(systemName: "bolt.horizontal.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.beansAmber)
+                    Text(beansLocalized("首选音源", "Preferred source"))
+                        .font(BeansFont.appFont(13, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Spacer()
+                    Text(preferredSourceStatusText)
+                        .font(BeansFont.appFont(12))
+                        .foregroundStyle(Color.beansComment)
+                }
+
+                Button {
+                    showPreferredSource = true
+                    BeansHaptics.tap()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bolt.horizontal.circle")
+                        Text(beansLocalized("解析顺位设置", "Resolution priority"))
                     }
                     .font(BeansFont.appFont(13, .semibold))
                     .foregroundStyle(Color.white)

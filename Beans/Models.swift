@@ -155,6 +155,19 @@ enum SongSource: String, Codable, Sendable {
     }
 }
 
+extension SongSource {
+    /// 界面上显示的平台名。插件音源的注册名由插件自己声明（如「哔哩哔哩」），
+    /// 这里不额外改写，避免和插件里的叫法对不上。
+    var sourceDisplayName: String {
+        switch self {
+        case .netease: return beansLocalized("网易云音乐", "NetEase")
+        case .qq: return beansLocalized("QQ 音乐", "QQ Music")
+        case .kugou: return beansLocalized("酷狗音乐", "Kugou")
+        case .plugin: return beansLocalized("插件音源", "Plugin source")
+        }
+    }
+}
+
 struct Song: Identifiable, Hashable, Codable {
     let id: Int
     let name: String

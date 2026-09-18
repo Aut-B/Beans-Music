@@ -23,7 +23,12 @@ enum UnblockService {
         return URLSession(configuration: config)
     }()
 
-    /// 入口：并发尝试用户导入且可用于当前平台的音源，返回第一个可用地址。
+    /// 入口：先试首选音源（pyncmd），再并发尝试用户导入且可用于当前平台的音源，
+    /// 返回第一个可用地址。
+    ///
+    /// `skipPreferredSource` 用于「调用方自己已经试过 pyncmd」的场景
+    /// （例如 `PlayerManager.neteaseResolve` 里官方接口之前那一次），
+    /// 避免同一个必失败的请求打两遍、白白多等一个超时。
     static func resolve(
         name: String,
         artists: String,
@@ -34,11 +39,18 @@ enum UnblockService {
         kugouID: String? = nil,
         quality: ThirdPartyAudioQuality = .current,
         strict: Bool = false,
-        excludedHosts: Set<String> = []
+        excludedHosts: Set<String> = [],
+        skipPreferredSource: Bool = false
     ) async -> Resolved? {
         let hasSongIdentity = !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !artists.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard hasSongIdentity else { return nil }
+
+        if !skipPreferredSource,
+           let hit = await preferredSourceResolve(songSource: songSource, neteaseID: neteaseID, name: name) {
+            return hit
+        }
+
         let sources = UnblockSourceStore.shared.sources
             .filter { source in
                 guard source.enabled else { return false }
@@ -65,6 +77,30 @@ enum UnblockService {
             quality: quality,
             excludedHosts: excludedHosts
         )
+    }
+
+    /// 首选顺位：pyncmd。
+    ///
+    /// 只对**网易云来源**生效 —— QQ / 酷狗传进来的 `neteaseID` 其实是各自平台的编号，
+    /// 拿它当网易云 id 去查会命中一首完全不相干的歌。
+    /// （酷狗兜底路径会先匹配到网易云、再以 `.netease` 调进来，所以同样能吃到这一层。）
+    static func preferredSourceResolve(
+        songSource: SongSource,
+        neteaseID: Int,
+        name: String = ""
+    ) async -> Resolved? {
+        let preferred = await PreferredSourceStore.currentSnapshot()
+        guard preferred.enabled, preferred.preferForNetease,
+              songSource == .netease, neteaseID > 0 else { return nil }
+        guard let hit = await PyncmdSource.mediaURL(neteaseID: neteaseID, quality: preferred.quality) else {
+            BeansLogger.shared.log("首选音源未命中（pyncmd）：\(name)｜id=\(neteaseID)", level: .debug)
+            return nil
+        }
+        BeansLogger.shared.log(
+            "首选音源命中（pyncmd）：\(name)｜id=\(neteaseID) 码率=\(hit.bitrate)kbps",
+            level: .info
+        )
+        return Resolved(url: hit.url, source: PyncmdSource.sourceTitle, quality: hit.quality)
     }
 
     private static func resolveSources(

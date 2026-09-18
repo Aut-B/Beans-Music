@@ -21,6 +21,7 @@ struct SongCell: View {
 
     @State private var showAddToPlaylist = false
     @State private var showComments = false
+    @State private var showRebind = false
     @State private var shareFile: ShareFileItem?
     @State private var appeared = false
 
@@ -127,6 +128,10 @@ struct SongCell: View {
         }
         .sheet(isPresented: $showComments) {
             CommentsSheet(song: song)
+                .environmentObject(theme)
+        }
+        .sheet(isPresented: $showRebind) {
+            SongSourceRebindSheet(song: song)
                 .environmentObject(theme)
         }
     }

@@ -156,7 +156,24 @@ final class DownloadManager {
     }
 
     private func resolveURL(song: Song, quality: DownloadQuality) async -> ResolvedDownloadURL? {
-        // 插件音源：直接向插件换取地址，不走第三方解锁链路
+        // 插件音源：先按首选音源顺位试 pyncmd，拿不到再问插件自己。
+        // 与播放保持一致，否则会出现「播放是 pyncmd 高音质、下载却还是插件的 320k」。
+        if song.source == .plugin {
+            let preferred = await PreferredSourceStore.currentSnapshot()
+            if preferred.enabled, preferred.preferForPlugin,
+               let matched = await PyncmdSource.matchNeteaseSong(
+                   name: song.name,
+                   artists: song.artists,
+                   durationMS: Int(max(0, song.duration) * 1000)
+               ),
+               let hit = await PyncmdSource.mediaURL(neteaseID: matched.id, quality: preferred.quality) {
+                BeansLogger.shared.log(
+                    "下载改用首选音源（pyncmd）：\(song.name) → 网易云 id=\(matched.id) 码率=\(hit.bitrate)kbps",
+                    level: .info
+                )
+                return ResolvedDownloadURL(url: hit.url, actualQuality: hit.quality, sourceName: PyncmdSource.sourceTitle)
+            }
+        }
         if song.source == .plugin,
            let platform = song.pluginPlatform,
            let itemID = song.pluginItemID,

@@ -124,6 +124,45 @@ final class LocalLibraryStore: ObservableObject {
         return playlists.contains { $0.songs.contains { $0.identityKey == song.identityKey } }
     }
 
+    /// 含有这首歌的本地歌单数量（换源面板用来判断「改了有没有用」）。
+    func playlistCount(containing song: Song) -> Int {
+        playlists.filter { $0.songs.contains { $0.identityKey == song.identityKey } }.count
+    }
+
+    /// 把本地歌单里某首歌**原地换成另一个来源的同名曲目**（换源）。
+    ///
+    /// 只改歌单里的条目，不动播放队列与播放历史 —— 换源本质是「以后从哪个平台取流」，
+    /// 已经播出去的东西不必追溯。位置保持不变，顺序不会被打乱；
+    /// 如果该歌单里本来就有目标曲目，则直接删掉旧条目，避免出现两条一样的歌。
+    ///
+    /// 返回值：被改动的歌单数量（0 表示这首歌不在任何本地歌单里）。
+    @discardableResult
+    func rebindSong(oldIdentity: String, to newSong: Song) -> Int {
+        var changed = 0
+        var result = playlists
+        for index in result.indices {
+            guard let position = result[index].songs.firstIndex(where: { $0.identityKey == oldIdentity }) else { continue }
+            if result[index].songs.contains(where: { $0.identityKey == newSong.identityKey }) {
+                result[index].songs.remove(at: position)
+            } else {
+                result[index].songs[position] = newSong
+            }
+            changed += 1
+        }
+        if changed > 0 { playlists = result }
+        return changed
+    }
+
+    /// 同一次换源可能被应用在多首歌上（批量场景），这里做一层去重合并。
+    @discardableResult
+    func rebindSongs(_ pairs: [(oldIdentity: String, newSong: Song)]) -> Int {
+        var total = 0
+        for pair in pairs {
+            total += rebindSong(oldIdentity: pair.oldIdentity, to: pair.newSong)
+        }
+        return total
+    }
+
     @discardableResult
     func addToDefaultFavorites(_ song: Song, name: String = "我的收藏歌单") -> String {
         let playlist = playlists.first(where: { $0.name == name }) ?? createPlaylist(name: name)

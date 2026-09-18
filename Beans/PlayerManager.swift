@@ -130,9 +130,13 @@ final class PlayerManager: NSObject, ObservableObject {
     private let defaults = UserDefaults.standard
     private var didAttemptAutoResume = false
 
-    /// 只要存在启用的自定义音源，就允许官方地址失败后进行兜底解析。
+    /// 是否存在可用的第三方解析能力：内置的 pyncmd，或任一启用中的自定义音源。
+    ///
+    /// 注意别只判「导入的音源」—— pyncmd 是 App 自带的，
+    /// 只按导入音源判会让一个音源都没导入的用户连 pyncmd 一起被关掉。
     private var externalSourcesEnabled: Bool {
-        UnblockSourceStore.shared.sources.contains(where: \.enabled)
+        if PreferredSourceStore.isEnabledSync { return true }
+        return UnblockSourceStore.shared.sources.contains(where: \.enabled)
     }
 
     private struct ThirdPartyVIPNotice {
@@ -500,10 +504,33 @@ final class PlayerManager: NSObject, ObservableObject {
             let thirdPartyQuality = ThirdPartyAudioQuality.current
             BeansLogger.shared.log("▶ 开始播放：\(song.name) - \(song.artists)｜平台=\(song.source.rawValue) id=\(song.id) 音质=\(quality.level) 第三方音质=\(thirdPartyQuality.rawValue) 自定义音源=\(enableUnblock ? "开" : "关") 官方受限=\(strictUnlock ? "是" : "否")", level: .info)
             if song.source == .plugin {
-                // 插件音源：直接向 MusicFree 插件换取播放地址（不经过官方接口与第三方解锁）
+                // 插件音源：先按首选顺位试 pyncmd，拿不到再问插件自己。
+                //
+                // 匹配用 strict 模式：必须歌名对得上、歌手也命中、时长差 12 秒以内。
+                // 非 strict 的「只按时长接近」那条退化分支在这里很危险 ——
+                // 哔哩哔哩条目的歌手是 UP 主名，如果只按时长硬匹配，
+                // 很容易把一段视频换成一首毫不相干的网易云歌曲。
+                let preferred = await PreferredSourceStore.currentSnapshot()
                 let pluginQuality = thirdPartyQuality.mfPluginQuality
                 var resolvedMedia: MFPluginMediaSource?
-                if let platform = song.pluginPlatform,
+                var pyncmdBitrate = 0
+                if preferred.enabled, preferred.preferForPlugin,
+                   let matched = await matchNetEaseSong(
+                       name: song.name,
+                       artists: song.artists,
+                       durationMS: Int(max(0, song.duration) * 1000),
+                       strict: true
+                   ),
+                   let hit = await PyncmdSource.mediaURL(neteaseID: matched.id, quality: preferred.quality) {
+                    BeansLogger.shared.log(
+                        "插件歌曲改用首选音源（pyncmd）：\(song.name) → 网易云 id=\(matched.id) 码率=\(hit.bitrate)kbps",
+                        level: .info
+                    )
+                    pyncmdBitrate = hit.bitrate
+                    resolvedMedia = MFPluginMediaSource(url: hit.url, headers: nil)
+                }
+                if resolvedMedia?.url == nil,
+                   let platform = song.pluginPlatform,
                    let itemID = song.pluginItemID,
                    let rawJSON = song.pluginRawJSON {
                     let item = MFPluginMusicItem(
@@ -525,13 +552,17 @@ final class PlayerManager: NSObject, ObservableObject {
                 }
                 if let mediaURL = resolvedMedia?.url {
                     let headers = resolvedMedia?.headers
+                    // pyncmd 命中时按实际码率标音质，而不是笼统记成 320k。
+                    let effectiveQuality = pyncmdBitrate > 0
+                        ? PyncmdQuality.quality(forBitrate: pyncmdBitrate)
+                        : thirdPartyQuality
                     await MainActor.run {
                         guard generation == self.loadGeneration else { return }
                         self.setupPlayer(
                             url: mediaURL,
                             resumeAt: initialProgress,
                             isThirdParty: true,
-                            thirdPartyQuality: thirdPartyQuality,
+                            thirdPartyQuality: effectiveQuality,
                             customHeaders: headers
                         )
                     }
@@ -635,7 +666,8 @@ final class PlayerManager: NSObject, ObservableObject {
         }
     }
 
-    /// 网易云播放地址解析：按设置音质取 URL，VIP/灰色歌曲交给第三方解锁。
+    /// 网易云播放地址解析：先试首选音源 pyncmd，再走官方接口，
+    /// VIP/灰色歌曲最后交给第三方解锁。
     private func neteaseResolve(
         song: Song,
         quality: BeansAudioQuality,
@@ -645,6 +677,19 @@ final class PlayerManager: NSObject, ObservableObject {
     ) async -> (String?, UnblockService.Resolved?) {
         var urlString: String?
         var resolved: UnblockService.Resolved?
+        // 首选顺位：pyncmd 按网易云 id 直接换直链。它给的常常是 flac，
+        // 而官方接口按所选音质只给到 320k，所以放在官方之前。
+        var triedPreferredSource = false
+        if enableUnblock {
+            triedPreferredSource = true
+            if let hit = await UnblockService.preferredSourceResolve(
+                songSource: .netease,
+                neteaseID: song.id,
+                name: song.name
+            ) {
+                return (nil, hit)
+            }
+        }
         let infos = try? await NetEaseAPI.shared.songURLInfo(ids: [song.id], level: quality.level)
         var info = infos?[song.id]
         if (info?.url == nil || info?.freeTrial == true), quality != .standard {
@@ -664,7 +709,9 @@ final class PlayerManager: NSObject, ObservableObject {
                 neteaseID: song.id,
                 songSource: .netease,
                 quality: thirdPartyQuality,
-                strict: strict
+                strict: strict,
+                // 上面已经试过 pyncmd，这里不必再打一遍同一个必失败的请求。
+                skipPreferredSource: triedPreferredSource
             )
         }
         BeansLogger.shared.log("网易云结果：\(song.name) 官方=\(urlString != nil ? "是" : "否") 第三方=\(resolved != nil ? "命中" : "未用/未命中")", level: .debug)
