@@ -103,6 +103,13 @@ final class PlayerManager: NSObject, ObservableObject {
     private var thirdPartyRetryExcludedHostsBySong: [String: Set<String>] = [:]
     /// 记录已经交给 AVPlayer 的第三方音质，失败后选择下一个更低档位。
     private var attemptedThirdPartyQualitiesBySong: [String: Set<String>] = [:]
+    /// 当前这首歌的播放地址是不是 pyncmd 给的高音质直链。
+    /// 只服务于「直链打不开时改回插件自身解析」这一个判断，切歌即重置。
+    private var pyncmdSuppliedSongKey: String?
+    /// 已经试过 pyncmd、但直链播不出来的插件歌曲。
+    /// 同一首歌不再重复试 pyncmd —— 否则会在「pyncmd 直链」和「插件地址」之间来回弹跳，
+    /// 而且 pyncmd 有 60 秒缓存，重试拿到的是同一条已经失效的直链。
+    private var pyncmdBlockedSongs: Set<String> = []
     private var activeThirdPartyQuality: ThirdPartyAudioQuality?
     /// 记录 QQ 官方 vkey 已经尝试过的 BR，官方地址实际打不开时继续换档位。
     private var attemptedQQOfficialBRsBySong: [String: Set<String>] = [:]
@@ -477,6 +484,10 @@ final class PlayerManager: NSObject, ObservableObject {
         activeQQOfficialBR = nil
         playbackRecoveryInFlightSongKey = nil
         finalizedFailureSongKey = nil
+        // 换歌就作废「上一次是 pyncmd 给的地址」这个标记；
+        // pyncmdBlockedSongs 故意不在每次 loadCurrent 里清 —— 它记的是「这首歌的直链试过、播不出来」，
+        // 清了就等于允许在同一首歌上反复回到那条打不开的直链。
+        pyncmdSuppliedSongKey = nil
         failureAutoSkipWorkItem?.cancel()
         failureAutoSkipWorkItem = nil
         playbackStallWorkItem?.cancel()
@@ -514,7 +525,11 @@ final class PlayerManager: NSObject, ObservableObject {
                 let pluginQuality = thirdPartyQuality.mfPluginQuality
                 var resolvedMedia: MFPluginMediaSource?
                 var pyncmdBitrate = 0
-                if preferred.enabled, preferred.preferForPlugin,
+                // 这首歌的 pyncmd 直链之前已经证明打不开，本次直接问插件自己。
+                let pyncmdBlocked = await MainActor.run {
+                    self.pyncmdBlockedSongs.contains(song.identityKey)
+                }
+                if preferred.enabled, preferred.preferForPlugin, !pyncmdBlocked,
                    let matched = await matchNetEaseSong(
                        name: song.name,
                        artists: song.artists,
@@ -528,6 +543,10 @@ final class PlayerManager: NSObject, ObservableObject {
                     )
                     pyncmdBitrate = hit.bitrate
                     resolvedMedia = MFPluginMediaSource(url: hit.url, headers: nil)
+                    // 记下来：这条地址是 pyncmd 给的。AVPlayer 打不开时据此退回插件自身解析，
+                    // 而不是直接判播放失败。
+                    let servedSongKey = song.identityKey
+                    await MainActor.run { self.pyncmdSuppliedSongKey = servedSongKey }
                 }
                 if resolvedMedia?.url == nil,
                    let platform = song.pluginPlatform,
@@ -842,10 +861,33 @@ final class PlayerManager: NSObject, ObservableObject {
         return true
     }
 
+    /// pyncmd 给插件歌曲换来的高音质直链偶发打不开（节点不可用、直链已过期等）。
+    /// 这种情况**不能让播放直接失败** —— 改用 pyncmd 之前，这首歌本来是用插件自己的地址播的，
+    /// 所以退一步回到插件自身解析（音质差一点，但能出声，符合「顺位递进」的本意）。
+    /// 同时把这首歌记进 `pyncmdBlockedSongs`，下次不再重复试 pyncmd。
+    @discardableResult
+    private func retryPyncmdPluginFallbackIfNeeded() -> Bool {
+        guard let song = currentSong,
+              song.source == .plugin,
+              pyncmdSuppliedSongKey == song.identityKey else { return false }
+        pyncmdSuppliedSongKey = nil
+        pyncmdBlockedSongs.insert(song.identityKey)
+        BeansLogger.shared.log(
+            "pyncmd 直链无法播放，改回插件自身解析：\(song.name)｜平台=\(song.pluginPlatform ?? "?")",
+            level: .info
+        )
+        loadCurrent(resumeAt: progress)
+        return true
+    }
+
     @discardableResult
     private func retryThirdPartyIfNeeded(excludingHost: String? = nil) -> Bool {
         guard let song = currentSong,
               externalSourcesEnabled else { return false }
+        // 插件音源的歌不走第三方解锁链路 —— `resolveThirdParty` 对 `.plugin` 直接返回 nil。
+        // 不早退的话这里会「假装重试成功」（返回 true 吞掉这次失败），再沿音质降级链空转几轮，
+        // 最后才报失败；而正确的动作是交给 retryPyncmdPluginFallbackIfNeeded 退回插件自身解析。
+        guard song.source != .plugin else { return false }
         if playbackRecoveryInFlightSongKey == song.identityKey {
             return true
         }
@@ -1140,6 +1182,7 @@ final class PlayerManager: NSObject, ObservableObject {
                 if !isThirdParty && self.retryQQOfficialIfNeeded() { return }
                 if !isThirdParty && self.fallbackQQToThirdPartyIfNeeded() { return }
                 if self.retryKugouAtStandardIfNeeded(error: item.error) { return }
+                if self.retryPyncmdPluginFallbackIfNeeded() { return }
                 self.finishUnrecoverablePlaybackFailure(song: loadedSong, reason: "AVPlayerItem 加载失败")
             }
         }
@@ -1167,6 +1210,7 @@ final class PlayerManager: NSObject, ObservableObject {
                         if !isThirdParty && self.retryQQOfficialIfNeeded() { return }
                         if !isThirdParty && self.fallbackQQToThirdPartyIfNeeded() { return }
                         if self.retryKugouAtStandardIfNeeded(error: item.error) { return }
+                        if self.retryPyncmdPluginFallbackIfNeeded() { return }
                         self.finishUnrecoverablePlaybackFailure(
                             song: loadedSong,
                             reason: "播放地址长时间未响应"
@@ -1263,6 +1307,7 @@ final class PlayerManager: NSObject, ObservableObject {
             if !isThirdParty && self.retryQQOfficialIfNeeded() { return }
             if !isThirdParty && self.fallbackQQToThirdPartyIfNeeded() { return }
             if isThirdParty && self.retryThirdPartyIfNeeded(excludingHost: url.host) { return }
+            if self.retryPyncmdPluginFallbackIfNeeded() { return }
             if self.retryKugouAtStandardIfNeeded(error: item.error) { return }
             self.finishUnrecoverablePlaybackFailure(song: loadedSong, reason: "播放中断失败")
         }
