@@ -129,6 +129,9 @@ extension LibraryProvider {
         case .netease: return .netease
         case .qq: return .qq
         case .kugou: return .kugou
+        // 插件音源不参与「平台显隐」那套开关（它由「有没有装插件」决定），
+        // 这里只是让 switch 完整；调用方不会用它来过滤插件入口。
+        case .plugin: return .netease
         }
     }
 }

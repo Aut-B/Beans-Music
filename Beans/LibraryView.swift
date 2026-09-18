@@ -8,6 +8,9 @@ enum LibraryProvider: String, CaseIterable, Identifiable {
     case netease = "网易云音乐"
     case qq = "QQ音乐"
     case kugou = "酷狗音乐"
+    /// MusicFree 插件音源（哔哩哔哩等）。它没有云端账号歌单，
+    /// 板块里放的是插件自己的搜索与榜单/歌单，可以一键存进本机歌单。
+    case plugin = "插件音源"
 
     var id: String { rawValue }
 
@@ -19,6 +22,8 @@ enum LibraryProvider: String, CaseIterable, Identifiable {
             return LinearGradient(colors: [Color(red: 0.15, green: 0.78, blue: 0.55), Color(red: 0.05, green: 0.58, blue: 0.42)], startPoint: .topLeading, endPoint: .bottomTrailing)
         case .kugou:
             return LinearGradient(colors: [Color(red: 0.12, green: 0.58, blue: 0.95), Color(red: 0.02, green: 0.32, blue: 0.72)], startPoint: .topLeading, endPoint: .bottomTrailing)
+        case .plugin:
+            return LinearGradient(colors: [Color(red: 0.99, green: 0.42, blue: 0.62), Color(red: 0.89, green: 0.23, blue: 0.51)], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
     }
 
@@ -27,6 +32,7 @@ enum LibraryProvider: String, CaseIterable, Identifiable {
         case .netease: return "cloud.fill"
         case .qq: return "play.rectangle.fill"
         case .kugou: return "music.note"
+        case .plugin: return "puzzlepiece.extension.fill"
         }
     }
 
@@ -35,6 +41,7 @@ enum LibraryProvider: String, CaseIterable, Identifiable {
         case .netease: return "BrandNetease"
         case .qq: return "BrandQQ"
         case .kugou: return "BrandKugou"
+        case .plugin: return nil
         }
     }
 }
@@ -45,6 +52,7 @@ private extension LibraryProvider {
         case .netease: return .netease
         case .qq: return .qq
         case .kugou: return .kugou
+        case .plugin: return .plugin
         }
     }
 }
@@ -57,6 +65,8 @@ struct LibraryView: View {
     @ObservedObject private var qqAuth = QQMusicAuth.shared
     @ObservedObject private var kugouAuth = KugouMusicAuth.shared
     @ObservedObject private var platformPrefs = PlatformPreferenceStore.shared
+    /// 装了插件音源才在平台上露出「插件音源」入口。
+    @ObservedObject private var pluginManager = MFPluginManager.shared
 
     @State private var showHistory = false
     @State private var showSectionSort = false
@@ -79,7 +89,12 @@ struct LibraryView: View {
     @State private var kugouLoading = false
     @State private var kugouSavedAt = Date.distantPast
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
-    private var libraryProviders: [LibraryProvider] { platformPrefs.enabledLibraryProviders }
+    private var libraryProviders: [LibraryProvider] {
+        var list = platformPrefs.enabledLibraryProviders
+        // 插件音源跟平台显隐开关无关：装了插件就出现在最后一位。
+        if !pluginManager.plugins.isEmpty { list.append(.plugin) }
+        return list
+    }
 
     private var orderedNeteasePlaylists: [Playlist] {
         SyncedPlaylistOrderStore.shared.ordered(auth.playlists, source: .netease)
@@ -109,6 +124,7 @@ struct LibraryView: View {
                 case .netease: return orderedNeteasePlaylists
                 case .qq: return orderedQQPlaylists
                 case .kugou: return orderedKugouPlaylists
+                case .plugin: return []
                 }
             },
             set: { value in
@@ -116,10 +132,18 @@ struct LibraryView: View {
                 case .netease: auth.playlists = value
                 case .qq: qqPlaylists = value
                 case .kugou: kugouPlaylists = value
+                case .plugin: break
                 }
+                guard source != .plugin else { return }
                 SyncedPlaylistOrderStore.shared.save(value, source: source.songSource)
             }
         )
+    }
+
+    /// 平台可见性判定。插件音源不在 PlatformPreferenceStore 的开关体系里，
+    /// 所以统一在这里判断，避免切到插件后被"纠正"回网易云。
+    private func ensureVisibleSource(_ candidate: LibraryProvider) -> LibraryProvider {
+        libraryProviders.contains(candidate) ? candidate : (libraryProviders.first ?? .netease)
     }
 
     private var isNativeClean: Bool {
@@ -186,16 +210,16 @@ struct LibraryView: View {
             }
         }
         .task {
-            source = platformPrefs.ensureVisible(source)
+            source = ensureVisibleSource(source)
         }
         .task(id: source) {
             await refreshCurrentSource(force: false)
         }
         .onAppear {
-            source = platformPrefs.ensureVisible(source)
+            source = ensureVisibleSource(source)
         }
         .onReceive(platformPrefs.changes) { _ in
-            let next = platformPrefs.ensureVisible(source)
+            let next = ensureVisibleSource(source)
             if next != source { source = next }
         }
         .onReceive(NotificationCenter.default.publisher(for: .beansNeteaseLoginDidUpdate)) { _ in
@@ -291,9 +315,11 @@ struct LibraryView: View {
                         BeansHaptics.tap()
                         showSectionSort = true
                     }
-                    GlassIconButton(systemName: "list.number", forceLiquid: isNativeClean) {
-                        BeansHaptics.tap()
-                        showSyncedPlaylistSort = true
+                    if source != .plugin {
+                        GlassIconButton(systemName: "list.number", forceLiquid: isNativeClean) {
+                            BeansHaptics.tap()
+                            showSyncedPlaylistSort = true
+                        }
                     }
                 }
                 }
@@ -312,9 +338,11 @@ struct LibraryView: View {
                         BeansHaptics.tap()
                         showSectionSort = true
                     }
-                    GlassIconButton(systemName: "list.number", forceLiquid: isNativeClean) {
-                        BeansHaptics.tap()
-                        showSyncedPlaylistSort = true
+                    if source != .plugin {
+                        GlassIconButton(systemName: "list.number", forceLiquid: isNativeClean) {
+                            BeansHaptics.tap()
+                            showSyncedPlaylistSort = true
+                        }
                     }
                 }
             }
@@ -553,6 +581,9 @@ struct LibraryView: View {
             await loadQQPlaylists(force: force)
         case .kugou:
             await loadKugouPlaylists(force: force)
+        case .plugin:
+            // 插件板块自己按平台加载，不需要这里预热。
+            break
         }
     }
 
@@ -806,6 +837,9 @@ struct LibraryView: View {
             }
         case .kugou:
             ToastCenter.shared.show("酷狗歌单暂不支持新建")
+        case .plugin:
+            // 插件音源没有云端账号歌单，插件板块里的「存到本机歌单」才是入口。
+            ToastCenter.shared.show("插件音源请用本机歌单保存歌曲")
         }
     }
 
@@ -847,6 +881,8 @@ struct LibraryView: View {
             }
         case .kugou:
             ToastCenter.shared.show("酷狗歌单暂不支持删除")
+        case .plugin:
+            break
         }
     }
 

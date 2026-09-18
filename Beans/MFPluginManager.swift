@@ -381,4 +381,69 @@ final class MFPluginManager: ObservableObject {
         }
         return (url, browserHeaders)
     }
+
+    // MARK: - 榜单 / 歌单
+
+    /// 插件榜单（MusicFree 的 `getTopLists`）。
+    /// 插件未实现该方法时 `call` 会抛错，界面据此把榜单入口隐藏掉。
+    func topLists(platform: String) async throws -> [MFPluginTopGroup] {
+        let value = try await engine.call(platform: platform, method: "getTopLists", args: [], timeout: 20)
+        guard let groups = value as? [[String: Any]] else {
+            throw MFPluginEngineError.script(beansLocalized("该音源没有提供榜单", "This source provides no charts"))
+        }
+        return groups.enumerated().compactMap { index, group in
+            let title = (group["title"] as? String) ?? beansLocalized("榜单", "Chart")
+            let rawItems = group["data"] as? [[String: Any]] ?? []
+            let items = rawItems.compactMap { Self.sheetItem(normalizing: $0, platform: platform) }
+            guard !items.isEmpty else { return nil }
+            return MFPluginTopGroup(id: "\(platform)|group-\(index)", title: title, items: items)
+        }
+    }
+
+    /// 榜单 / 歌单详情（`getTopListDetail`），展开成可播放曲目。
+    /// `page` 从 1 开始；不支持分页的插件会忽略它。
+    func sheetDetail(platform: String, sheet: MFPluginSheetItem, page: Int) async throws -> (isEnd: Bool, items: [MFPluginMusicItem]) {
+        guard let data = sheet.rawJSON.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            throw MFPluginEngineError.script(beansLocalized("歌单数据异常", "Corrupted sheet data"))
+        }
+        let value = try await engine.call(
+            platform: platform, method: "getTopListDetail", args: [object, page], timeout: 25
+        )
+        guard let dict = value as? [String: Any] else {
+            throw MFPluginEngineError.script(beansLocalized("歌单返回格式异常", "Unexpected sheet result"))
+        }
+        let rawItems = (dict["musicList"] as? [[String: Any]])
+            ?? (dict["data"] as? [[String: Any]])
+            ?? []
+        let items = rawItems.compactMap { MFPluginMusicItem(normalizing: $0, platform: platform) }
+        // 有些插件只回一页全部数据，不给 isEnd；items 为空时直接视为到底。
+        let isEnd = (dict["isEnd"] as? Bool) ?? items.isEmpty
+        return (isEnd, items)
+    }
+
+    private static func sheetItem(normalizing dict: [String: Any], platform: String) -> MFPluginSheetItem? {
+        let sheetID = (dict["id"] as? String) ?? (dict["id"] as? NSNumber)?.stringValue
+        guard let sheetID, !sheetID.isEmpty else { return nil }
+        let cover = (dict["coverImg"] as? String)
+            ?? (dict["artwork"] as? String)
+            ?? (dict["cover"] as? String)
+            ?? (dict["picUrl"] as? String)
+        let detail = (dict["description"] as? String)
+            ?? (dict["artist"] as? String)
+            ?? (dict["playCount"] as? NSNumber)?.stringValue
+            ?? ""
+        let rawJSON = (try? JSONSerialization.data(withJSONObject: dict)).flatMap {
+            String(data: $0, encoding: .utf8)
+        } ?? "{}"
+        return MFPluginSheetItem(
+            id: "\(platform)|\(sheetID)",
+            platform: platform,
+            sheetID: sheetID,
+            title: (dict["title"] as? String) ?? (dict["name"] as? String) ?? sheetID,
+            cover: cover.flatMap { URL(string: $0) },
+            detail: detail,
+            rawJSON: rawJSON
+        )
+    }
 }

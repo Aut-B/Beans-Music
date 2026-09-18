@@ -1135,6 +1135,8 @@ struct SettingsView: View {
     @EnvironmentObject private var player: PlayerManager
     /// 插件音源条目数展示用；与 ProfileView 里的是同一个单例。
     @ObservedObject private var pluginManager = MFPluginManager.shared
+    /// WebDAV 同步状态展示用；与设置页里的是同一个单例。
+    @ObservedObject private var webdavSync = WebDAVSyncStore.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("beans.themeMode") private var themeModeRaw = BeansThemeMode.system.rawValue
@@ -1208,6 +1210,8 @@ struct SettingsView: View {
     @State private var showRestoreConfirm = false
     @State private var showSourceManager = false
     @State private var showPluginManager = false
+    /// 本机歌单的 WebDAV 同步设置
+    @State private var showWebDAVSync = false
     @State private var showEqualizer = false
     @State private var backupExpanded = false
     @State private var backupIncludeAccounts = false
@@ -1538,6 +1542,10 @@ struct SettingsView: View {
                 .environmentObject(theme)
                 .environmentObject(player)
                 .environmentObject(auth)
+        }
+        .sheet(isPresented: $showWebDAVSync) {
+            WebDAVSettingsView()
+                .environmentObject(theme)
         }
         .sheet(isPresented: $showEqualizer) {
             EqualizerSettingsView()
@@ -2487,6 +2495,37 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "puzzlepiece.extension")
                         Text(beansLocalized("管理 MusicFree 插件", "Manage MusicFree Plugins"))
+                    }
+                    .font(BeansFont.appFont(13, .semibold))
+                    .foregroundStyle(Color.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.black, in: Capsule())
+                }
+                .buttonStyle(GlassPressButtonStyle(scale: 0.97))
+
+                HStack(spacing: 10) {
+                    Image(systemName: "externaldrive.badge.icloud")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.beansAmber)
+                    Text(beansLocalized("歌单 WebDAV 同步", "Playlist WebDAV Sync"))
+                        .font(BeansFont.appFont(13, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Spacer()
+                    Text(webdavSync.config.isComplete
+                         ? beansLocalized("已配置", "Configured")
+                         : beansLocalized("未配置", "Not set"))
+                        .font(BeansFont.appFont(12))
+                        .foregroundStyle(Color.beansComment)
+                }
+
+                Button {
+                    showWebDAVSync = true
+                    BeansHaptics.tap()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.triangle.2.circlepath.icloud")
+                        Text(beansLocalized("同步本机歌单到网盘", "Sync local playlists to cloud"))
                     }
                     .font(BeansFont.appFont(13, .semibold))
                     .foregroundStyle(Color.white)

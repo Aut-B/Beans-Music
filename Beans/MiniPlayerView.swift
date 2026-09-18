@@ -10,12 +10,10 @@ struct MiniPlayerView: View {
 
     @EnvironmentObject private var theme: ThemeStore
     @EnvironmentObject private var player: PlayerManager
-    @EnvironmentObject private var clock: PlaybackClock
     @Binding var showPlayer: Bool
     var presentation: Presentation = .dock
     var transitionNamespace: Namespace.ID?
     @State private var miniLyrics: [LyricLine] = []
-    @AppStorage("beans.lyricOffset") private var lyricOffset = 0.0
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     @AppStorage("beans.showSongVIPBadge") private var showSongVIPBadge = true
 
@@ -23,24 +21,6 @@ struct MiniPlayerView: View {
     private var controlSize: CGFloat { 32 }
     private var containerRadius: CGFloat { 18 }
     private var verticalPadding: CGFloat { 4 }
-
-    /// 二分查找当前播放到的歌词行（歌词按时间升序）
-    private var currentLyricLine: LyricLine? {
-        guard !miniLyrics.isEmpty else { return nil }
-        var low = 0
-        var high = miniLyrics.count - 1
-        var answer: LyricLine?
-        while low <= high {
-            let mid = (low + high) / 2
-            if miniLyrics[mid].time <= LyricTiming.effectiveProgress(clock.progress, userOffset: lyricOffset) {
-                answer = miniLyrics[mid]
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
-        }
-        return answer
-    }
 
     var body: some View {
         let _ = theme.accent
@@ -72,12 +52,9 @@ struct MiniPlayerView: View {
                                 .background(Capsule().fill(Color(red: 0.93, green: 0.25, blue: 0.22)))
                         }
                     }
-                    Text(currentLyricLine?.text ?? player.currentSong?.artists ?? "")
-                        .font(BeansFont.appFont(10))
-                        .foregroundStyle(Color.beansComment)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .animation(.easeInOut(duration: 0.25), value: currentLyricLine?.text)
+                    // 歌词行单独抽成子视图：只有它订阅播放进度并随进度重绘，
+                    // 封面、模糊光晕和按钮不再跟着每一次进度更新一起重算。
+                    MiniPlayerLyricLine(lyrics: miniLyrics, fallback: player.currentSong?.artists ?? "")
                 }
                 Spacer(minLength: 8)
                 Button {
@@ -173,6 +150,45 @@ struct MiniPlayerView: View {
         guard let raw else { return }
         guard player.currentSong?.identityKey == identity else { return }
         miniLyrics = LyricParser.parse(raw)
+    }
+}
+
+// MARK: - 迷你播放器歌词行
+//
+// 播放进度由 PlaybackClock 驱动，更新频率很高。把「读进度 → 二分找当前歌词行」
+// 收敛到这个小视图里，父级的封面、模糊光晕和按钮就不会被带着一起重绘。
+
+private struct MiniPlayerLyricLine: View {
+    @EnvironmentObject private var clock: PlaybackClock
+    @AppStorage("beans.lyricOffset") private var lyricOffset = 0.0
+    let lyrics: [LyricLine]
+    let fallback: String
+
+    private var currentText: String? {
+        guard !lyrics.isEmpty else { return nil }
+        let progress = LyricTiming.effectiveProgress(clock.progress, userOffset: lyricOffset)
+        var low = 0
+        var high = lyrics.count - 1
+        var answer: LyricLine?
+        while low <= high {
+            let mid = (low + high) / 2
+            if lyrics[mid].time <= progress {
+                answer = lyrics[mid]
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return answer?.text
+    }
+
+    var body: some View {
+        Text(currentText ?? fallback)
+            .font(BeansFont.appFont(10))
+            .foregroundStyle(Color.beansComment)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .animation(.easeInOut(duration: 0.25), value: currentText)
     }
 }
 

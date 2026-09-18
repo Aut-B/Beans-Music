@@ -84,6 +84,28 @@ struct MFPluginMountResult: Sendable {
     let userVariables: [[String: Any]]
 }
 
+// MARK: - 插件歌单 / 榜单
+
+/// 插件 `getTopLists` / `getRecommendSheetsByTag` 返回的「歌单卡片」。
+struct MFPluginSheetItem: Identifiable, Hashable {
+    /// 复合稳定 id："platform|sheetID"。
+    let id: String
+    let platform: String
+    let sheetID: String
+    let title: String
+    let cover: URL?
+    let detail: String
+    /// 回传给 `getTopListDetail` / `getMusicSheetInfo` 的原始 JSON。
+    let rawJSON: String
+}
+
+/// 插件榜单的分组（MusicFree 里一屏一组的横向列表）。
+struct MFPluginTopGroup: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let items: [MFPluginSheetItem]
+}
+
 // MARK: - 音质映射
 
 extension ThirdPartyAudioQuality {

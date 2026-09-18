@@ -35,6 +35,8 @@ final class LocalLibraryStore: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let key = "beans.localLibrary.playlists"
+    /// 自动上传的防抖任务：连续增删歌曲时只发一次请求。
+    private var autoSyncTask: Task<Void, Never>?
 
     private init() {
         if let data = defaults.data(forKey: key),
@@ -142,5 +144,52 @@ final class LocalLibraryStore: ObservableObject {
         if let data = try? JSONEncoder().encode(playlists) {
             defaults.set(data, forKey: key)
         }
+        scheduleAutoSync()
+    }
+
+    /// 开了「改动后自动上传」就延迟几秒静默上传一次，把连续操作合并成一次请求。
+    private func scheduleAutoSync() {
+        autoSyncTask?.cancel()
+        autoSyncTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            let sync = WebDAVSyncStore.shared
+            guard sync.autoSync, sync.config.isComplete, !sync.status.isWorking else { return }
+            _ = try? await sync.upload()
+        }
+    }
+
+    // MARK: - 云端同步
+
+    /// 合并外部歌单（WebDAV 快照 / MusicFree 备份导入）。
+    ///
+    /// 同 id 或同名的歌单做**并集**：按 `identityKey` 去重后把云端独有的歌曲补进来，
+    /// 本机已有的顺序保持不变；本地没有的歌单整体追加。返回（新增歌单数, 新增歌曲数）。
+    @discardableResult
+    func merge(_ incoming: [LocalPlaylist]) -> (playlists: Int, songs: Int) {
+        var addedPlaylists = 0
+        var addedSongs = 0
+        var result = playlists
+        for remote in incoming {
+            if let index = result.firstIndex(where: { $0.id == remote.id || $0.name == remote.name }) {
+                let existing = Set(result[index].songs.map(\.identityKey))
+                let fresh = remote.songs.filter { !existing.contains($0.identityKey) }
+                if !fresh.isEmpty {
+                    result[index].songs.append(contentsOf: fresh)
+                    addedSongs += fresh.count
+                }
+            } else {
+                result.append(remote)
+                addedPlaylists += 1
+                addedSongs += remote.songs.count
+            }
+        }
+        if result != playlists { playlists = result }
+        return (addedPlaylists, addedSongs)
+    }
+
+    /// 用云端快照整体替换本机歌单（危险操作，调用方需二次确认）。
+    func replaceAll(_ incoming: [LocalPlaylist]) {
+        playlists = incoming
     }
 }
