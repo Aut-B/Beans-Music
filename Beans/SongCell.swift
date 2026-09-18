@@ -4,6 +4,8 @@ struct SongCell: View {
     @EnvironmentObject private var theme: ThemeStore
     @EnvironmentObject private var player: PlayerManager
     @EnvironmentObject private var auth: AuthStore
+    /// 换源功能只对「本地歌单里的歌」有意义，所以这里要问到歌单内容。
+    @ObservedObject private var library = LocalLibraryStore.shared
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     @AppStorage("beans.showSongVIPBadge") private var showSongVIPBadge = true
     @AppStorage(ThirdPartyAudioQuality.downloadStorageKey) private var downloadQualityRaw = ThirdPartyAudioQuality.kb320.rawValue
@@ -96,6 +98,14 @@ struct SongCell: View {
                 showComments = true
             } label: {
                 Label("查看评论", systemImage: "bubble.left.and.bubble.right")
+            }
+            // 换源只改本地歌单里的条目，不在任何歌单里就不显示，免得点了没反应。
+            if library.playlistCount(containing: song) > 0 {
+                Button {
+                    showRebind = true
+                } label: {
+                    Label("更换音源", systemImage: "arrow.triangle.2.circlepath")
+                }
             }
             if downloadFeatureUnlocked {
                 Button {

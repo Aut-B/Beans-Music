@@ -1193,6 +1193,7 @@ struct SettingsView: View {
     @ObservedObject private var equalizer = BeansEqualizer.shared
     @AppStorage(ThirdPartyAudioQuality.storageKey) private var thirdPartyAudioQualityRaw = ThirdPartyAudioQuality.kb320.rawValue
     @ObservedObject private var platformPrefs = PlatformPreferenceStore.shared
+    @ObservedObject private var preferredSource = PreferredSourceStore.shared
 
     @State private var appearanceExpanded = false
     @State private var platformExpanded = false
@@ -1228,6 +1229,19 @@ struct SettingsView: View {
 
     private var customSourceCount: Int {
         sourceStore.managementVisibleSources.count
+    }
+
+    /// 「首选音源」行右侧的状态文字。
+    /// 单独抽成 `String` 属性（而不是直接写进 `Text`）：三元式两个分支都是字符串字面量时，
+    /// `Text(LocalizedStringKey)` 与 `Text(StringProtocol)` 两个重载会撞车，编译不过。
+    private var preferredSourceStatusText: String {
+        guard preferredSource.enabled else {
+            return beansLocalized("已关闭", "Off")
+        }
+        let scope = preferredSource.preferForPlugin
+            ? beansLocalized("含插件歌曲", "incl. plugin tracks")
+            : beansLocalized("仅网易云", "NetEase only")
+        return "\(preferredSource.quality.displayName) · \(scope)"
     }
 
     private var thirdPartyAudioQualityOptions: [ThirdPartyAudioQuality] {
