@@ -388,6 +388,7 @@ struct LocalPlaylistDetailSheet: View {
     @State private var renameText = ""
     @State private var playlistSearchText = ""
     @State private var multiSelectMode = false
+    @State private var sortMode = false
     @State private var selectedSongKeys: Set<String> = []
     @State private var showAddSelectedDestination = false
 
@@ -405,6 +406,30 @@ struct LocalPlaylistDetailSheet: View {
                 || song.artists.lowercased().contains(keyword)
                 || song.album.lowercased().contains(keyword)
         }
+    }
+
+    /// 排序模式且未在搜索时才允许拖动：搜索结果是子集，
+    /// 它的下标与歌单真实下标对不上，拖动会把歌挪到错误的位置。
+    private var canReorder: Bool {
+        sortMode && playlistSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 传 nil 时 List 不显示拖动手柄，正好让「搜索中」的列表退回只读。
+    private var reorderAction: ((IndexSet, Int) -> Void)? {
+        guard canReorder else { return nil }
+        return { offsets, destination in
+            LocalLibraryStore.shared.moveSongs(playlistID: playlistID, from: offsets, to: destination)
+            BeansHaptics.tap()
+        }
+    }
+
+    /// 排序模式的说明文字。写成带显式类型的属性而不是 `Text(...)` 里的三元表达式：
+    /// 两个字符串字面量的三元式会让 `Text(LocalizedStringKey)` 与
+    /// `Text(StringProtocol)` 撞在一起，编译期报歧义。
+    private var sortHintText: LocalizedStringKey {
+        canReorder
+            ? "拖动每行右侧的手柄调整顺序，改动会立刻保存。"
+            : "搜索状态下不能调整顺序，先清空搜索框再拖动。"
     }
 
     var body: some View {
@@ -467,11 +492,21 @@ struct LocalPlaylistDetailSheet: View {
                                         }
                                     }
                                 }
+                                .onMove(perform: reorderAction)
                             }
+                        }
+                        if sortMode {
+                            Section {
+                                Text(sortHintText)
+                                    .font(BeansFont.appFont(12))
+                                    .foregroundStyle(Color.beansComment)
+                            }
+                            .listRowBackground(Color.clear)
                         }
                     }
                     .beansScrollContentBackgroundHidden()
                     .listStyle(.plain)
+                    .environment(\.editMode, .constant(sortMode ? .active : .inactive))
                     .searchable(text: $playlistSearchText, placement: .navigationBarDrawer(displayMode: .always), prompt: LocalizedStringKey("搜索本地歌单歌曲"))
                 } else {
                     EmptyStateView(icon: "music.note.list", text: "歌单不存在或已删除")
@@ -488,12 +523,23 @@ struct LocalPlaylistDetailSheet: View {
                     Menu {
                         Button {
                             multiSelectMode.toggle()
+                            if multiSelectMode { sortMode = false }
                             if !multiSelectMode {
                                 selectedSongKeys.removeAll()
                             }
                         } label: {
                             Label(multiSelectMode ? "退出多选" : "多选编辑", systemImage: multiSelectMode ? "xmark.circle" : "checklist")
                         }
+                        Button {
+                            sortMode.toggle()
+                            if sortMode {
+                                multiSelectMode = false
+                                selectedSongKeys.removeAll()
+                            }
+                        } label: {
+                            Label(sortMode ? "完成排序" : "调整歌曲顺序", systemImage: sortMode ? "checkmark.circle" : "arrow.up.arrow.down.circle")
+                        }
+                        .disabled(visibleSongs.count < 2)
                         if multiSelectMode {
                             Button(role: .destructive) {
                                 removeSelectedSongs()
@@ -722,120 +768,4 @@ struct LocalSearchAddSheet: View {
         }
     }
 
-}
-
-
-// MARK: - 加入本地歌单（播放页入口：选择已创建的本地歌单，或新建并加入）
-
-struct AddToLocalPlaylistSheet: View {
-    @ObservedObject private var store = LocalLibraryStore.shared
-    @EnvironmentObject private var theme: ThemeStore
-    @Environment(\.dismiss) private var dismiss
-
-    let song: Song
-    @State private var showCreateField = false
-    @State private var newName = ""
-    @State private var message: String?
-
-    var body: some View {
-        let _ = theme.accent
-        BeansNavigationStack {
-            List {
-                if store.playlists.isEmpty {
-                    Text("还没有本地歌单，先创建一个吧")
-                        .foregroundStyle(Color.beansComment)
-                } else {
-                    Section("选择本地歌单") {
-                        ForEach(store.playlists) { playlist in
-                            Button {
-                                store.addSong(song, to: playlist.id)
-                                BeansHaptics.success()
-                                ToastCenter.shared.show("已加入「\(playlist.name)」")
-                                dismiss()
-                            } label: {
-                                HStack(spacing: 12) {
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .fill(LinearGradient(colors: [Color.beansAmber.opacity(0.75), Color.beansAmber.opacity(0.35)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                            .frame(width: 40, height: 40)
-                                        Image(systemName: "music.note.list")
-                                            .font(.system(size: 15, weight: .semibold))
-                                            .foregroundStyle(.white)
-                                    }
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(playlist.name)
-                                            .font(BeansFont.appFont(15, .medium))
-                                            .foregroundStyle(Color.beansLabel)
-                                            .lineLimit(1)
-                                        Text(beansLocalSongCountText(playlist.songs.count))
-                                            .font(BeansFont.appFont(11))
-                                            .foregroundStyle(Color.beansComment)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "plus.circle.fill")
-                                        .font(.system(size: 15))
-                                        .foregroundStyle(Color.beansAmber)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if showCreateField {
-                    Section("新建本地歌单") {
-                        TextField("歌单名称", text: $newName)
-                            .submitLabel(.done)
-                        Button {
-                            createAndAdd()
-                        } label: {
-                            Text("创建并加入")
-                                .font(BeansFont.appFont(15, .semibold))
-                                .foregroundStyle(Color.beansAmber)
-                        }
-                    }
-                } else {
-                    Section {
-                        Button {
-                            showCreateField = true
-                        } label: {
-                            Label("新建歌单并加入", systemImage: "plus.circle")
-                        }
-                    }
-                }
-
-                if let message {
-                    Section {
-                        Text(message)
-                            .font(BeansFont.appFont(13))
-                            .foregroundStyle(Color.beansSage)
-                    }
-                }
-            }
-            .navigationTitle("加入本地歌单")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
-                }
-            }
-        }
-        .modifier(BeansSheetModifier(detents: [.medium, .large], dragIndicator: true))
-        .onAppear {
-            if store.playlists.isEmpty {
-                ToastCenter.shared.show(store.addToDefaultFavorites(song))
-                BeansHaptics.success()
-                dismiss()
-            }
-        }
-    }
-
-    private func createAndAdd() {
-        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        let playlist = store.createPlaylist(name: name)
-        store.addSong(song, to: playlist.id)
-        BeansHaptics.success()
-        ToastCenter.shared.show("已创建「\(name)」并加入")
-        dismiss()
-    }
 }

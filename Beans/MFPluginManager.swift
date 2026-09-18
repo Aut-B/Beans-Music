@@ -422,6 +422,70 @@ final class MFPluginManager: ObservableObject {
         return (isEnd, items)
     }
 
+    /// 插件评论。
+    ///
+    /// MusicFree 协议里的评论方法是 `getMusicComments(musicItem)`，返回
+    /// `{ isEnd, data: [{ id, nickName, avatar, comment, like, createAt }] }`。
+    /// 实现了它的音源（哔哩哔哩、部分 wy/qq 插件）都能直接用，
+    /// **插件没实现时返回 nil**（而不是抛错），调用方据此回退到 App 内置的原生解析。
+    func pluginMusicComments(platform: String, item: MFPluginMusicItem, page: Int) async throws -> (comments: [SongComment], isEnd: Bool)? {
+        guard let itemData = item.rawJSON.data(using: .utf8),
+              let itemObject = (try? JSONSerialization.jsonObject(with: itemData)) as? [String: Any] else {
+            return nil
+        }
+        var value: Any?
+        do {
+            value = try await engine.call(
+                platform: platform, method: "getMusicComments", args: [itemObject, page], timeout: 20
+            )
+        } catch MFPluginEngineError.script(let message) {
+            // 插件没实现这个方法，交给调用方回退到原生解析；其它脚本错误照常上抛。
+            guard message.contains("method not implemented") else {
+                throw MFPluginEngineError.script(message)
+            }
+            return nil
+        } catch {
+            throw error
+        }
+        guard let dict = value as? [String: Any] else { return nil }
+        let rawItems = (dict["data"] as? [[String: Any]]) ?? (dict["comments"] as? [[String: Any]]) ?? []
+        let comments = rawItems.enumerated().compactMap { index, raw in
+            Self.songComment(normalizing: raw, fallbackKey: "\(platform)|\(item.itemID)|\(page)|\(index)")
+        }
+        // 多数插件只给一页，不给 isEnd，这时按"到底了"处理。
+        let isEnd = (dict["isEnd"] as? Bool) ?? true
+        return (comments, isEnd)
+    }
+
+    /// 把 MusicFree 的评论条目换成 App 的 `SongComment`。
+    /// 字段名在协议里是 nickName / comment / like / createAt（毫秒时间戳），
+    /// 但有的插件会写成 nickname / content，两种都认。
+    private static func songComment(normalizing dict: [String: Any], fallbackKey: String) -> SongComment? {
+        let content = (dict["comment"] as? String) ?? (dict["content"] as? String) ?? ""
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let id = (dict["id"] as? NSNumber)?.intValue
+            ?? (dict["id"] as? String).flatMap { Int($0) }
+            ?? Song.syntheticPluginID(fallbackKey)
+        var avatar = (dict["avatar"] as? String) ?? (dict["avatarUrl"] as? String) ?? ""
+        if avatar.hasPrefix("//") { avatar = "https:" + avatar }
+        let stamp = (dict["createAt"] as? NSNumber)?.doubleValue
+            ?? (dict["ctime"] as? NSNumber)?.doubleValue
+            ?? 0
+        let likes = (dict["like"] as? NSNumber)?.intValue
+            ?? (dict["likedCount"] as? NSNumber)?.intValue
+            ?? 0
+        return SongComment(
+            id: id,
+            content: content,
+            nickname: (dict["nickName"] as? String) ?? (dict["nickname"] as? String) ?? "",
+            avatarURL: URL(string: avatar),
+            // 协议给的是毫秒，老接口给的是秒，超过 100 亿按毫秒折算
+            time: Date(timeIntervalSince1970: stamp > 10_000_000_000 ? stamp / 1000 : stamp),
+            likedCount: likes,
+            isHot: likes >= 100
+        )
+    }
+
     private static func sheetItem(normalizing dict: [String: Any], platform: String) -> MFPluginSheetItem? {
         let sheetID = (dict["id"] as? String) ?? (dict["id"] as? NSNumber)?.stringValue
         guard let sheetID, !sheetID.isEmpty else { return nil }

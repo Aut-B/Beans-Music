@@ -17,7 +17,6 @@ struct PlayerView: View {
     @AppStorage("beans.player.lastLyricsPage") private var lastLyricsPage = false
     @State private var showQueue = false
     @State private var showSleepTimer = false
-    @State private var showAddToPlaylist = false
     @State private var showComments = false
     @State private var showDownloadPicker = false
     @State private var showMoreActions = false
@@ -28,7 +27,7 @@ struct PlayerView: View {
     /// 下载完成后直接弹原生分享（用户自行选择保存或转发）
     @State private var shareFile: ShareFileItem?
     @State private var sharedFileURL: URL?
-    @State private var showAddToLocalPlaylist = false
+    @State private var showPlaylistPicker = false
     @State private var showPlayerSettings = false
     @State private var showArtistHome = false
     @State private var pickedArtistName = ""
@@ -198,7 +197,7 @@ struct PlayerView: View {
             ToastCenter.shared.show(removed > 0 ? "已取消收藏" : "歌曲不在本地歌单中")
             BeansHaptics.success()
         } else if localLibrary.playlists.count > 1 {
-            showAddToLocalPlaylist = true
+            showPlaylistPicker = true
         } else {
             ToastCenter.shared.show(localLibrary.addToDefaultFavorites(song))
             BeansHaptics.success()
@@ -393,7 +392,7 @@ struct PlayerView: View {
                             showSleepTimer = true
                         },
                         onAddToLocalPlaylist: {
-                            showAddToLocalPlaylist = true
+                            showPlaylistPicker = true
                         },
                         onDownload: {
                             showDownloadPicker = true
@@ -593,12 +592,6 @@ struct PlayerView: View {
                 .environmentObject(theme)
         }
         .sheet(isPresented: $showSleepTimer) { SleepTimerSheet().environmentObject(player) }
-        .sheet(isPresented: $showAddToPlaylist) {
-            if let song {
-                AddToPlaylistSheet(song: song)
-                    .environmentObject(auth)
-            }
-        }
         .sheet(isPresented: $showComments) {
             if let song {
                 CommentsSheet(song: song)
@@ -623,9 +616,11 @@ struct PlayerView: View {
         .sheet(item: $shareFile, onDismiss: cleanupSharedFile) { item in
             ShareSheet(items: [item.url])
         }
-        .sheet(isPresented: $showAddToLocalPlaylist) {
+        .sheet(isPresented: $showPlaylistPicker) {
             if let song {
-                AddToLocalPlaylistSheet(song: song)
+                AddToPlaylistSheet(song: song)
+                    .environmentObject(theme)
+                    .environmentObject(auth)
             }
         }
         .sheet(isPresented: $showArtistHome) {
@@ -656,8 +651,8 @@ struct PlayerView: View {
             Button("定时关闭") {
                 showSleepTimer = true
             }
-            Button("添加到本地歌单") {
-                showAddToLocalPlaylist = true
+            Button("添加到歌单") {
+                showPlaylistPicker = true
             }
             if downloadFeatureUnlocked {
                 Button("下载歌曲") {
@@ -852,9 +847,9 @@ struct PlayerView: View {
                 showMoreActions = false
                 showSleepTimer = true
             }
-            moreActionRow("添加到本地歌单", systemName: "text.badge.plus") {
+            moreActionRow("添加到歌单", systemName: "text.badge.plus") {
                 showMoreActions = false
-                showAddToLocalPlaylist = true
+                showPlaylistPicker = true
             }
             if downloadFeatureUnlocked {
                 moreActionRow("下载歌曲", systemName: "arrow.down.circle") {
@@ -1036,7 +1031,7 @@ struct PlayerView: View {
 
             Menu {
                 Button("定时关闭") { showSleepTimer = true }
-                Button("添加到本地歌单") { showAddToLocalPlaylist = true }
+                Button("添加到歌单") { showPlaylistPicker = true }
                 if downloadFeatureUnlocked {
                     Button("下载歌曲") { showDownloadPicker = true }
                 }
@@ -1228,7 +1223,7 @@ struct PlayerView: View {
 
             Menu {
                 Button("定时关闭") { showSleepTimer = true }
-                Button("添加到本地歌单") { showAddToLocalPlaylist = true }
+                Button("添加到歌单") { showPlaylistPicker = true }
                 if downloadFeatureUnlocked {
                     Button("下载歌曲") { showDownloadPicker = true }
                 }

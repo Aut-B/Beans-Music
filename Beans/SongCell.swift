@@ -20,6 +20,7 @@ struct SongCell: View {
     var onTap: (() -> Void)?
 
     @State private var showAddToPlaylist = false
+    @State private var showComments = false
     @State private var shareFile: ShareFileItem?
     @State private var appeared = false
 
@@ -90,6 +91,11 @@ struct SongCell: View {
             } label: {
                 Label("添加到歌单", systemImage: "text.badge.plus")
             }
+            Button {
+                showComments = true
+            } label: {
+                Label("查看评论", systemImage: "bubble.left.and.bubble.right")
+            }
             if downloadFeatureUnlocked {
                 Button {
                     Task { await downloadSong() }
@@ -112,11 +118,16 @@ struct SongCell: View {
             }
         }
         .sheet(isPresented: $showAddToPlaylist) {
-            AddToLocalPlaylistSheet(song: song)
+            AddToPlaylistSheet(song: song)
                 .environmentObject(theme)
+                .environmentObject(auth)
         }
         .sheet(item: $shareFile) { item in
             ShareSheet(items: [item.url])
+        }
+        .sheet(isPresented: $showComments) {
+            CommentsSheet(song: song)
+                .environmentObject(theme)
         }
     }
 

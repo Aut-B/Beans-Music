@@ -205,7 +205,7 @@ struct ReferencePlaybackView: View {
             ) { onFavorite() }
             Menu {
                 Button("定时关闭", action: onSleepTimer)
-                Button("添加到本地歌单", action: onAddToLocalPlaylist)
+                Button("添加到歌单", action: onAddToLocalPlaylist)
                 if downloadFeatureUnlocked {
                     Button("下载歌曲", action: onDownload)
                 }
@@ -323,7 +323,7 @@ struct ReferencePlaybackView: View {
                 }
                 Menu {
                     Button("定时关闭", action: onSleepTimer)
-                    Button("添加到本地歌单", action: onAddToLocalPlaylist)
+                    Button("添加到歌单", action: onAddToLocalPlaylist)
                     if downloadFeatureUnlocked {
                         Button("下载歌曲", action: onDownload)
                     }

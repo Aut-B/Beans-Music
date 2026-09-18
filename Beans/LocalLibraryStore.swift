@@ -97,6 +97,28 @@ final class LocalLibraryStore: ObservableObject {
         return after - before
     }
 
+    /// 调整歌单内歌曲顺序（List 拖动排序的结果），顺序随歌单一起持久化。
+    func moveSongs(playlistID: UUID, from offsets: IndexSet, to destination: Int) {
+        guard let idx = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        var reordered = playlists
+        reordered[idx].songs.move(fromOffsets: offsets, toOffset: destination)
+        playlists = reordered
+    }
+
+    /// 单曲上移 / 下移一步（`offset` 传 -1 或 1）。
+    /// 拖动排序在长歌单里不好对准，菜单里的上移/下移用来做精细微调。
+    @discardableResult
+    func moveSong(playlistID: UUID, songIdentity: String, offset: Int) -> Bool {
+        guard let idx = playlists.firstIndex(where: { $0.id == playlistID }),
+              let from = playlists[idx].songs.firstIndex(where: { $0.identityKey == songIdentity }) else { return false }
+        let to = from + offset
+        guard playlists[idx].songs.indices.contains(to) else { return false }
+        var reordered = playlists
+        reordered[idx].songs.swapAt(from, to)
+        playlists = reordered
+        return true
+    }
+
     func containsSong(_ song: Song?) -> Bool {
         guard let song else { return false }
         return playlists.contains { $0.songs.contains { $0.identityKey == song.identityKey } }

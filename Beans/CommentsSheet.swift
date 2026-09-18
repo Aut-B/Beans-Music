@@ -33,6 +33,13 @@ struct CommentsSheet: View {
     @State private var kugouComments: [SongComment] = []
     @State private var kugouTotal = 0
     @State private var kugouPageNum = 1
+    @State private var pluginComments: [SongComment] = []
+    @State private var pluginCommentsTotal = 0
+    @State private var pluginCommentsEnd = true
+    @State private var pluginPageNum = 1
+    /// 该音源没有可查的评论区（插件未实现 getMusicComments、条目也不是 B 站）时置位，
+    /// 显示一句提示而不是空白页。
+    @State private var pluginCommentsUnsupported = false
     @State private var loading = true
     @State private var errorMessage: String?
     @State private var offset = 0
@@ -57,6 +64,16 @@ struct CommentsSheet: View {
                         kugouCommentList
                     } else if song.source == .qq {
                         qqCommentList
+                    } else if song.source == .plugin {
+                        // 插件音源的评论由插件自己的 getMusicComments 提供；
+                        // 插件没实现时，B 站条目回退到 App 内置的原生评论解析。
+                        if pluginCommentsUnsupported {
+                            EmptyStateView(icon: "bubble.left", text: "该音源暂不支持查看评论")
+                        } else if pluginComments.isEmpty {
+                            EmptyStateView(icon: "bubble.left", text: "暂无评论")
+                        } else {
+                            pluginCommentList
+                        }
                     } else if let page {
                         if page.hot.isEmpty && page.comments.isEmpty {
                             EmptyStateView(icon: "bubble.left", text: "暂无评论")
@@ -113,6 +130,36 @@ struct CommentsSheet: View {
         .beansScrollContentBackgroundHidden()
     }
 
+    // MARK: - B 站条目识别（原生回退路径用）
+
+    /// 从插件条目里取出 BV 号。
+    ///
+    /// 先看原始条目 JSON 里的 `bvid`——那是插件搜索结果的规范字段，有它就一定是 B 站条目；
+    /// 读不到再按平台名判断，并在条目 id / 原始 JSON 文本里用正则捞 BV 号，
+    /// 因为旧歌单存的条目可能只有 id 字段，而 B 站条目的 id 本身就是 BV 号。
+    private var bilibiliBVID: String? {
+        guard song.source == .plugin else { return nil }
+        if let raw = song.pluginRawJSON,
+           let data = raw.data(using: .utf8),
+           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let bvid = object["bvid"] as? String,
+           !bvid.isEmpty {
+            return bvid
+        }
+        guard Self.isBilibiliPlatform(song.pluginPlatform) else { return nil }
+        for text in [song.pluginItemID ?? "", song.pluginRawJSON ?? ""] {
+            if let range = text.range(of: "BV[0-9A-Za-z]{10}", options: .regularExpression) {
+                return String(text[range])
+            }
+        }
+        return nil
+    }
+
+    private static func isBilibiliPlatform(_ platform: String?) -> Bool {
+        let name = (platform ?? "").lowercased()
+        return name.contains("bili") || name.contains("哔哩") || name.contains("b站")
+    }
+
     private func load(reset: Bool) async {
         if reset {
             offset = 0
@@ -123,11 +170,25 @@ struct CommentsSheet: View {
             kugouComments = []
             kugouTotal = 0
             kugouPageNum = 1
+            pluginComments = []
+            pluginCommentsTotal = 0
+            pluginCommentsEnd = true
+            pluginPageNum = 1
+            pluginCommentsUnsupported = false
             loading = true
         }
         errorMessage = nil
         do {
-            if song.source == .kugou {
+            if song.source == .plugin {
+                let supported = try await loadPluginComments(page: pluginPageNum)
+                guard supported else {
+                    pluginCommentsUnsupported = true
+                    loading = false
+                    return
+                }
+                loading = false
+                return
+            } else if song.source == .kugou {
                 let mixSongID = song.kugouAlbumAudioId ?? ""
                 let result = try await KugouMusicAPI.shared.comments(
                     mixSongID: mixSongID,
@@ -247,6 +308,100 @@ struct CommentsSheet: View {
                 .beansScrollContentBackgroundHidden()
             }
         }
+    }
+
+    // MARK: - 插件音源评论
+
+    /// 重建插件条目：`getMusicComments` 要的是插件自己的条目对象（里面有 bvid/aid），
+    /// 不能传 App 归一化后的 `Song`。
+    private var pluginItem: MFPluginMusicItem {
+        let platform = song.pluginPlatform ?? ""
+        return MFPluginMusicItem(
+            id: "\(platform)|\(song.pluginItemID ?? "")",
+            platform: platform,
+            itemID: song.pluginItemID ?? "",
+            title: song.name,
+            artist: song.artists,
+            album: song.album,
+            artwork: song.coverURL?.absoluteString,
+            durationMS: Int(song.duration * 1000),
+            rawJSON: song.pluginRawJSON ?? "{}"
+        )
+    }
+
+    /// 拉一页插件评论；返回 false 表示这个音源没有可用的评论接口。
+    private func loadPluginComments(page: Int) async throws -> Bool {
+        // ① 插件自己实现了 MusicFree 的 getMusicComments（哔哩哔哩插件就有）
+        let fetched = try await MFPluginManager.shared.pluginMusicComments(
+            platform: song.pluginPlatform ?? "", item: pluginItem, page: page
+        )
+        // B 站条目 + 插件返回空，不能就此收场：条目里可能没有 aid，
+        // 插件拿不到 oid 只会回一个空列表，这种情况改走 App 内置的原生解析。
+        if let fetched, !fetched.comments.isEmpty || bilibiliBVID == nil {
+            merge(fetched.comments, replace: page <= 1)
+            pluginCommentsTotal = max(pluginCommentsTotal, pluginComments.count)
+            pluginCommentsEnd = fetched.isEnd || fetched.comments.isEmpty
+            return true
+        }
+        // ② 原生 B 站解析
+        guard let bvid = bilibiliBVID else { return false }
+        let result = try await BilibiliCommentsAPI.comments(bvid: bvid, page: page)
+        merge(result.comments, replace: page <= 1)
+        pluginCommentsTotal = result.total
+        pluginCommentsEnd = result.comments.count < BilibiliCommentsAPI.pageSize
+        return true
+    }
+
+    /// 首页整体替换，翻页只补新条目（按评论 id 去重）。
+    private func merge(_ incoming: [SongComment], replace: Bool) {
+        if replace {
+            pluginComments = incoming
+        } else {
+            let existing = Set(pluginComments.map(\.id))
+            pluginComments.append(contentsOf: incoming.filter { !existing.contains($0.id) })
+        }
+    }
+
+    /// 评论条数里显示的来源名：B 站条目统一写成「哔哩哔哩」，
+    /// 免得把插件注册名（如 "b站-ios"）直接摆到界面上。
+    private var pluginPlatformLabel: String {
+        bilibiliBVID != nil ? "哔哩哔哩" : (song.pluginPlatform ?? "插件音源")
+    }
+
+    private var pluginCommentList: some View {
+        List {
+            Section {
+                Text(beansCommentCountText(
+                    songName: song.name,
+                    platform: pluginPlatformLabel,
+                    count: pluginCommentsTotal > 0 ? pluginCommentsTotal : pluginComments.count
+                ))
+                .font(BeansFont.appFont(12))
+                .foregroundStyle(Color.beansComment)
+            }
+            .listRowBackground(Color.clear)
+            Section("评论") {
+                ForEach(pluginComments) { comment in
+                    CommentRow(comment: comment)
+                        .listRowBackground(Color.clear)
+                }
+            }
+            if !pluginCommentsEnd {
+                Section {
+                    Button {
+                        pluginPageNum += 1
+                        Task { await load(reset: false) }
+                    } label: {
+                        Text("加载更多")
+                            .font(BeansFont.appFont(14, .semibold))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .listRowBackground(Color.clear)
+            }
+        }
+        .beansScrollContentBackgroundHidden()
     }
 
     private func loadMore() async {
