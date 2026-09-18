@@ -388,7 +388,8 @@ struct LocalPlaylistDetailSheet: View {
     @State private var renameText = ""
     @State private var playlistSearchText = ""
     @State private var multiSelectMode = false
-    @State private var sortMode = false
+    /// 排序模式直接用 List 的 editMode 当唯一状态：置为 .active 时每行右侧会出现拖动手柄。
+    @State private var editMode: EditMode = .inactive
     @State private var selectedSongKeys: Set<String> = []
     @State private var showAddSelectedDestination = false
 
@@ -413,6 +414,8 @@ struct LocalPlaylistDetailSheet: View {
     private var canReorder: Bool {
         sortMode && playlistSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    private var sortMode: Bool { editMode == .active }
 
     /// 传 nil 时 List 不显示拖动手柄，正好让「搜索中」的列表退回只读。
     private var reorderAction: ((IndexSet, Int) -> Void)? {
@@ -506,7 +509,7 @@ struct LocalPlaylistDetailSheet: View {
                     }
                     .beansScrollContentBackgroundHidden()
                     .listStyle(.plain)
-                    .environment(\.editMode, .constant(sortMode ? .active : .inactive))
+                    .environment(\.editMode, $editMode)
                     .searchable(text: $playlistSearchText, placement: .navigationBarDrawer(displayMode: .always), prompt: LocalizedStringKey("搜索本地歌单歌曲"))
                 } else {
                     EmptyStateView(icon: "music.note.list", text: "歌单不存在或已删除")
@@ -523,7 +526,7 @@ struct LocalPlaylistDetailSheet: View {
                     Menu {
                         Button {
                             multiSelectMode.toggle()
-                            if multiSelectMode { sortMode = false }
+                            if multiSelectMode { editMode = .inactive }
                             if !multiSelectMode {
                                 selectedSongKeys.removeAll()
                             }
@@ -531,15 +534,19 @@ struct LocalPlaylistDetailSheet: View {
                             Label(multiSelectMode ? "退出多选" : "多选编辑", systemImage: multiSelectMode ? "xmark.circle" : "checklist")
                         }
                         Button {
-                            sortMode.toggle()
-                            if sortMode {
+                            if editMode == .active {
+                                editMode = .inactive
+                            } else {
+                                editMode = .active
                                 multiSelectMode = false
                                 selectedSongKeys.removeAll()
                             }
                         } label: {
                             Label(sortMode ? "完成排序" : "调整歌曲顺序", systemImage: sortMode ? "checkmark.circle" : "arrow.up.arrow.down.circle")
                         }
-                        .disabled(visibleSongs.count < 2)
+                        // 只有"歌不够排"且当前不在排序中时才禁用；
+                        // 已经在排序里就别禁用，否则搜索到只剩 1 首时会退不出排序模式。
+                        .disabled(editMode == .inactive && (playlist?.songs.count ?? 0) < 2)
                         if multiSelectMode {
                             Button(role: .destructive) {
                                 removeSelectedSongs()
