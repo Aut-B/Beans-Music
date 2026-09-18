@@ -190,6 +190,7 @@ struct LibraryView: View {
                             case .netease: playlistsSection
                             case .qq: qqSection
                             case .kugou: kugouSection
+                            case .plugin: PluginLibrarySection()
                             }
                         case "最近播放":
                             historySection
@@ -362,6 +363,7 @@ struct LibraryView: View {
         case .netease: return beansLocalized("网易云音乐歌单", "NetEase Cloud Music Playlists")
         case .qq: return "QQ 音乐收藏与歌单"
         case .kugou: return "酷狗云端歌单"
+        case .plugin: return "插件音源搜歌、榜单与歌单导入"
         }
     }
 
