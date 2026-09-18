@@ -12,13 +12,15 @@ targets:
   Beans:
     type: application
     platform: iOS
-    sources: [Beans]
-    resources:
-      - Beans/en.lproj
-      - Beans/zh-Hans.lproj
-      # MusicFree 插件运行时（crypto-js / cheerio / axios 兼容层等），
-      # 由 MFPluginEngine 从 Bundle.main 按文件名装载，必须落在 bundle 根目录。
-      - PluginRuntime
+    sources:
+      - Beans
+      # MusicFree 插件运行时（crypto-js / cheerio / qs / he 等 JS 库与胶水层）。
+      # 注意：XcodeGen 的 target 规格里没有 resources 键，写了会被静默忽略；
+      # 必须写成 sources 的一项并显式指定 buildPhase: resources，才会进入
+      # Copy Bundle Resources。目录无扩展名 → 默认按 group 处理，内部 .js 会被
+      # 平铺复制到 app bundle 根目录，正好对上 MFPluginEngine 按文件名装载的方式。
+      - path: PluginRuntime
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beans.app
