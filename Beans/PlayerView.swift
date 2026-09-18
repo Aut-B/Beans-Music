@@ -2791,6 +2791,13 @@ struct PlayerView: View {
         case .kugou:
             let encoded = song.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? song.name
             return URL(string: "https://www.kugou.com/yy/html/search.html#searchType=song&searchKeyWord=\(encoded)")
+        case .plugin:
+            // 哔哩哔哩条目 id 就是 BV 号，可以直接给出视频地址；其余插件按标题搜索
+            if let itemID = song.pluginItemID, itemID.hasPrefix("BV") {
+                return URL(string: "https://www.bilibili.com/video/\(itemID)")
+            }
+            let encoded = song.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? song.name
+            return URL(string: "https://www.bilibili.com/search?keyword=\(encoded)")
         }
     }
 

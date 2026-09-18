@@ -156,6 +156,30 @@ final class DownloadManager {
     }
 
     private func resolveURL(song: Song, quality: DownloadQuality) async -> ResolvedDownloadURL? {
+        // 插件音源：直接向插件换取地址，不走第三方解锁链路
+        if song.source == .plugin,
+           let platform = song.pluginPlatform,
+           let itemID = song.pluginItemID,
+           let rawJSON = song.pluginRawJSON {
+            let item = MFPluginMusicItem(
+                id: "\(platform)|\(itemID)",
+                platform: platform,
+                itemID: itemID,
+                title: song.name,
+                artist: song.artists,
+                album: song.album,
+                artwork: song.coverURL?.absoluteString,
+                durationMS: Int(max(0, song.duration) * 1000),
+                rawJSON: rawJSON
+            )
+            let media = await MFPluginManager.shared.getMediaSource(
+                platform: platform,
+                item: item,
+                quality: quality.mfPluginQuality
+            )
+            guard let mediaURL = media.url else { return nil }
+            return ResolvedDownloadURL(url: mediaURL, actualQuality: quality, sourceName: platform)
+        }
         // 下载优先复用已配置的第三方音源，避免播放能用第三方而下载仍走官方地址。
         let thirdPartyID = song.source == .netease ? song.id : 0
         let thirdPartyKugouID = song.kugouHash ?? song.kugouAlbumAudioId
@@ -221,6 +245,9 @@ final class DownloadManager {
             if !cookie.isEmpty {
                 request.setValue(cookie, forHTTPHeaderField: "Cookie")
             }
+        } else if url.host?.lowercased().contains("bilivideo") == true {
+            // B 站 CDN 校验 Referer，缺失会 403
+            request.setValue("https://www.bilibili.com/", forHTTPHeaderField: "Referer")
         }
         return request
     }

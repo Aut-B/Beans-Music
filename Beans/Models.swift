@@ -112,6 +112,7 @@ enum ThirdPartyAudioQuality: String, CaseIterable, Identifiable, Sendable {
         case .netease: return supported(providerCode: "wy")
         case .qq: return supported(providerCode: "tx")
         case .kugou: return supported(providerCode: "kg")
+        case .plugin: return allCases
         }
     }
 
@@ -138,11 +139,14 @@ enum ThirdPartyAudioQuality: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// 歌曲来源（网易云 / QQ音乐 / 酷狗音乐）
+/// 歌曲来源（网易云 / QQ音乐 / 酷狗音乐 / MusicFree 插件音源）
 enum SongSource: String, Codable, Sendable {
     case netease
     case qq
     case kugou
+    /// 由 MusicFree 插件音源提供的曲目（哔哩哔哩、第三方 wy/qq/kw 插件等）。
+    /// 播放地址由 MFPluginManager 向插件换取，不经过官方接口。
+    case plugin
 
     /// 兼容旧版本地收藏：未知或已下线来源统一回退为网易云
     init(from decoder: Decoder) throws {
@@ -171,6 +175,12 @@ struct Song: Identifiable, Hashable, Codable {
     let kugouQualityHashes: [String: String]?
     /// 付费/VIP 标记（网易云：0 免费、1 VIP、4 付费单曲；QQ：0 免费、非 0 付费）
     let fee: Int
+    /// MusicFree 插件音源：插件声明的平台名（source == .plugin 时有效）
+    let pluginPlatform: String?
+    /// MusicFree 插件音源：条目在该插件内的 id
+    let pluginItemID: String?
+    /// MusicFree 插件音源：插件返回的原始条目 JSON，取流时原样回传
+    let pluginRawJSON: String?
 
     var formattedDuration: String {
         let total = max(0, Int(duration))
@@ -183,6 +193,7 @@ struct Song: Identifiable, Hashable, Codable {
         case .qq: return "qq-\(id)"
         case .kugou: return "kugou-\(id)"
         case .netease: return "netease-\(id)"
+        case .plugin: return "plugin-\(pluginPlatform ?? "")-\(pluginItemID ?? String(id))"
         }
     }
 
@@ -197,10 +208,12 @@ struct Song: Identifiable, Hashable, Codable {
             return fee != 0
         case .kugou:
             return fee != 0
+        case .plugin:
+            return false
         }
     }
 
-    init(id: Int, name: String, artists: String, album: String, coverURL: URL?, duration: TimeInterval, source: SongSource = .netease, qqMid: String? = nil, qqMediaMid: String? = nil, kugouHash: String? = nil, kugouAlbumAudioId: String? = nil, kugouAlbumId: String? = nil, kugouQualityHashes: [String: String]? = nil, fee: Int = 0) {
+    init(id: Int, name: String, artists: String, album: String, coverURL: URL?, duration: TimeInterval, source: SongSource = .netease, qqMid: String? = nil, qqMediaMid: String? = nil, kugouHash: String? = nil, kugouAlbumAudioId: String? = nil, kugouAlbumId: String? = nil, kugouQualityHashes: [String: String]? = nil, fee: Int = 0, pluginPlatform: String? = nil, pluginItemID: String? = nil, pluginRawJSON: String? = nil) {
         self.id = id
         self.name = name
         self.artists = artists
@@ -215,6 +228,42 @@ struct Song: Identifiable, Hashable, Codable {
         self.kugouAlbumId = kugouAlbumId
         self.kugouQualityHashes = kugouQualityHashes
         self.fee = fee
+        self.pluginPlatform = pluginPlatform
+        self.pluginItemID = pluginItemID
+        self.pluginRawJSON = pluginRawJSON
+    }
+
+    /// 由 MusicFree 插件搜索结果构建。`id` 用稳定的合成值，
+    /// 因为插件条目的 id 是字符串（BV 号等），而 Song.id 是 Int。
+    init(pluginItem: MFPluginMusicItem) {
+        self.id = Self.syntheticPluginID(pluginItem.id)
+        self.name = pluginItem.title
+        self.artists = pluginItem.artist
+        self.album = pluginItem.album
+        self.coverURL = pluginItem.artworkURL
+        self.duration = pluginItem.duration
+        self.source = .plugin
+        self.qqMid = nil
+        self.qqMediaMid = nil
+        self.kugouHash = nil
+        self.kugouAlbumAudioId = nil
+        self.kugouAlbumId = nil
+        self.kugouQualityHashes = nil
+        self.fee = 0
+        self.pluginPlatform = pluginItem.platform
+        self.pluginItemID = pluginItem.itemID
+        self.pluginRawJSON = pluginItem.rawJSON
+    }
+
+    /// "platform|itemID" → 稳定的 31 位正整数（FNV-1a），
+    /// 保证同一插件条目在不同会话中得到相同的本地 id。
+    static func syntheticPluginID(_ compositeKey: String) -> Int {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in compositeKey.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        return Int(hash & 0x7FFF_FFFF)
     }
 
     init?(json: [String: Any]) {
@@ -245,9 +294,12 @@ struct Song: Identifiable, Hashable, Codable {
         kugouAlbumId = nil
         kugouQualityHashes = nil
         fee = json["fee"] as? Int ?? 0
+        pluginPlatform = nil
+        pluginItemID = nil
+        pluginRawJSON = nil
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, artists, album, coverURL, duration, source, qqMid, qqMediaMid, kugouHash, kugouAlbumAudioId, kugouAlbumId, kugouQualityHashes, fee }
+    private enum CodingKeys: String, CodingKey { case id, name, artists, album, coverURL, duration, source, qqMid, qqMediaMid, kugouHash, kugouAlbumAudioId, kugouAlbumId, kugouQualityHashes, fee, pluginPlatform, pluginItemID, pluginRawJSON }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -265,6 +317,9 @@ struct Song: Identifiable, Hashable, Codable {
         kugouAlbumId = try c.decodeIfPresent(String.self, forKey: .kugouAlbumId)
         kugouQualityHashes = try c.decodeIfPresent([String: String].self, forKey: .kugouQualityHashes)
         fee = try c.decodeIfPresent(Int.self, forKey: .fee) ?? 0
+        pluginPlatform = try c.decodeIfPresent(String.self, forKey: .pluginPlatform)
+        pluginItemID = try c.decodeIfPresent(String.self, forKey: .pluginItemID)
+        pluginRawJSON = try c.decodeIfPresent(String.self, forKey: .pluginRawJSON)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -283,6 +338,9 @@ struct Song: Identifiable, Hashable, Codable {
         try c.encodeIfPresent(kugouAlbumId, forKey: .kugouAlbumId)
         try c.encodeIfPresent(kugouQualityHashes, forKey: .kugouQualityHashes)
         try c.encode(fee, forKey: .fee)
+        try c.encodeIfPresent(pluginPlatform, forKey: .pluginPlatform)
+        try c.encodeIfPresent(pluginItemID, forKey: .pluginItemID)
+        try c.encodeIfPresent(pluginRawJSON, forKey: .pluginRawJSON)
     }
 }
 

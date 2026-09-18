@@ -11,16 +11,20 @@ final class FavoritesStore: ObservableObject {
     @Published private(set) var neteaseFavoriteSongs: [Song] = []
     /// 酷狗红心收藏（本地持久化，酷狗暂无稳定云端红心写入接口）
     @Published private(set) var kugouFavoriteSongs: [Song] = []
+    /// 插件音源红心收藏（本地持久化，插件没有云端红心接口）
+    @Published private(set) var pluginFavoriteSongs: [Song] = []
 
     private let defaults = UserDefaults.standard
     private let neteaseKey = "beans.fav.netease.v1"
     private let qqKey = "beans.fav.qq.v1"
     private let kugouKey = "beans.fav.kugou.v1"
+    private let pluginKey = "beans.fav.plugin.v1"
 
     private init() {
         qqFavoriteSongs = Self.loadSongs(qqKey)
         neteaseFavoriteSongs = Self.loadSongs(neteaseKey)
         kugouFavoriteSongs = Self.loadSongs(kugouKey)
+        pluginFavoriteSongs = Self.loadSongs(pluginKey)
     }
 
     /// 该歌曲是否已收藏
@@ -36,6 +40,8 @@ final class FavoritesStore: ObservableObject {
             return qqFavoriteSongs.contains { $0.identityKey == song.identityKey }
         case .kugou:
             return kugouFavoriteSongs.contains { $0.identityKey == song.identityKey }
+        case .plugin:
+            return pluginFavoriteSongs.contains { $0.identityKey == song.identityKey }
         }
     }
 
@@ -74,6 +80,11 @@ final class FavoritesStore: ObservableObject {
         case .kugou:
             let liked = !isLiked(song)
             updateKugou(song, liked: liked)
+            return true
+        case .plugin:
+            // 插件音源没有云端红心接口，仅本地收藏
+            let liked = !isLiked(song)
+            updatePlugin(song, liked: liked)
             return true
         }
     }
@@ -129,8 +140,17 @@ final class FavoritesStore: ObservableObject {
         saveSongs(kugouFavoriteSongs, key: kugouKey)
     }
 
-    private static func loadSongs(_ key: String) -> [Song] {
-        guard let data = UserDefaults.standard.data(forKey: key),
+    private func updatePlugin(_ song: Song, liked: Bool) {
+        if liked {
+            pluginFavoriteSongs.removeAll { $0.identityKey == song.identityKey }
+            pluginFavoriteSongs.insert(song, at: 0)
+        } else {
+            pluginFavoriteSongs.removeAll { $0.identityKey == song.identityKey }
+        }
+        saveSongs(pluginFavoriteSongs, key: pluginKey)
+    }
+
+    private static func loadSongs(_ key: String) -> [Song] {        guard let data = UserDefaults.standard.data(forKey: key),
               let saved = try? JSONDecoder().decode([Song].self, from: data) else { return [] }
         return saved
     }

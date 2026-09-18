@@ -13,6 +13,8 @@ struct ProfileView: View {
     @EnvironmentObject private var theme: ThemeStore
     @EnvironmentObject private var auth: AuthStore
     @EnvironmentObject private var player: PlayerManager
+    /// 插件音源数量展示（MusicFree 插件，与「自定义音源」并列）
+    @ObservedObject private var pluginManager = MFPluginManager.shared
     @AppStorage("beans.themeMode") private var themeModeRaw = BeansThemeMode.system.rawValue
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     @AppStorage("beans.homeHeaderHideSort") private var homeHeaderHideSort = false
@@ -1200,6 +1202,7 @@ struct SettingsView: View {
     @State private var pendingRestore: [String: Any]?
     @State private var showRestoreConfirm = false
     @State private var showSourceManager = false
+    @State private var showPluginManager = false
     @State private var showEqualizer = false
     @State private var backupExpanded = false
     @State private var backupIncludeAccounts = false
@@ -1524,6 +1527,12 @@ struct SettingsView: View {
         .sheet(isPresented: $showSourceManager) {
             ThirdPartySourceManagerSheet()
                 .environmentObject(theme)
+        }
+        .sheet(isPresented: $showPluginManager) {
+            MFPluginManagerSheet()
+                .environmentObject(theme)
+                .environmentObject(player)
+                .environmentObject(auth)
         }
         .sheet(isPresented: $showEqualizer) {
             EqualizerSettingsView()
@@ -2444,6 +2453,35 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "square.and.pencil")
                         Text(beansLocalized("管理 / 导入音源", "Manage / Import Sources"))
+                    }
+                    .font(BeansFont.appFont(13, .semibold))
+                    .foregroundStyle(Color.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.black, in: Capsule())
+                }
+                .buttonStyle(GlassPressButtonStyle(scale: 0.97))
+
+                HStack(spacing: 10) {
+                    Image(systemName: "puzzlepiece.extension.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.beansAmber)
+                    Text(beansLocalized("插件音源", "Plugin Sources"))
+                        .font(BeansFont.appFont(13, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Spacer()
+                    Text(beansLocalized("\(pluginManager.plugins.count) 个", "\(pluginManager.plugins.count)"))
+                        .font(BeansFont.appFont(12))
+                        .foregroundStyle(Color.beansComment)
+                }
+
+                Button {
+                    showPluginManager = true
+                    BeansHaptics.tap()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "puzzlepiece.extension")
+                        Text(beansLocalized("管理 MusicFree 插件", "Manage MusicFree Plugins"))
                     }
                     .font(BeansFont.appFont(13, .semibold))
                     .foregroundStyle(Color.white)

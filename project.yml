@@ -16,6 +16,9 @@ targets:
     resources:
       - Beans/en.lproj
       - Beans/zh-Hans.lproj
+      # MusicFree 插件运行时（crypto-js / cheerio / axios 兼容层等），
+      # 由 MFPluginEngine 从 Bundle.main 按文件名装载，必须落在 bundle 根目录。
+      - PluginRuntime
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.beans.app

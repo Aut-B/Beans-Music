@@ -499,6 +499,61 @@ final class PlayerManager: NSObject, ObservableObject {
             let quality = (forceKugouStandard && song.source == .kugou) ? .standard : BeansAudioQuality.current
             let thirdPartyQuality = ThirdPartyAudioQuality.current
             BeansLogger.shared.log("▶ 开始播放：\(song.name) - \(song.artists)｜平台=\(song.source.rawValue) id=\(song.id) 音质=\(quality.level) 第三方音质=\(thirdPartyQuality.rawValue) 自定义音源=\(enableUnblock ? "开" : "关") 官方受限=\(strictUnlock ? "是" : "否")", level: .info)
+            if song.source == .plugin {
+                // 插件音源：直接向 MusicFree 插件换取播放地址（不经过官方接口与第三方解锁）
+                let pluginQuality = thirdPartyQuality.mfPluginQuality
+                var resolvedMedia: MFPluginMediaSource?
+                if let platform = song.pluginPlatform,
+                   let itemID = song.pluginItemID,
+                   let rawJSON = song.pluginRawJSON {
+                    let item = MFPluginMusicItem(
+                        id: "\(platform)|\(itemID)",
+                        platform: platform,
+                        itemID: itemID,
+                        title: song.name,
+                        artist: song.artists,
+                        album: song.album,
+                        artwork: song.coverURL?.absoluteString,
+                        durationMS: Int(max(0, song.duration) * 1000),
+                        rawJSON: rawJSON
+                    )
+                    resolvedMedia = await MFPluginManager.shared.getMediaSource(
+                        platform: platform,
+                        item: item,
+                        quality: pluginQuality
+                    )
+                }
+                if let mediaURL = resolvedMedia?.url {
+                    let headers = resolvedMedia?.headers
+                    await MainActor.run {
+                        guard generation == self.loadGeneration else { return }
+                        self.setupPlayer(
+                            url: mediaURL,
+                            resumeAt: initialProgress,
+                            isThirdParty: true,
+                            thirdPartyQuality: thirdPartyQuality,
+                            customHeaders: headers
+                        )
+                    }
+                    return
+                }
+                await MainActor.run {
+                    guard generation == self.loadGeneration else { return }
+                    self.isBuffering = false
+                    self.loadFailed = true
+                    let failureMessage = beansLocalized(
+                        "插件音源解析失败，请确认该音源仍可用，或切换到其他音源",
+                        "The plugin source could not resolve this track. Check the plugin or switch sources."
+                    )
+                    BeansLogger.shared.log("播放失败：\(song.name) - \(failureMessage)｜插件=\(song.pluginPlatform ?? "?")", level: .error)
+                    self.finishUnrecoverablePlaybackFailure(
+                        song: song,
+                        reason: "插件音源解析失败",
+                        message: failureMessage
+                    )
+                }
+                return
+            }
             if song.source == .kugou {
                 urlString = try? await KugouMusicAPI.shared.songURL(song: song, quality: quality)
                 if urlString == nil {
@@ -944,7 +999,8 @@ final class PlayerManager: NSObject, ObservableObject {
         isThirdParty: Bool = false,
         thirdPartyQuality: ThirdPartyAudioQuality? = nil,
         qqOfficialBR: String? = nil,
-        attemptedQQOfficialBRs: [String] = []
+        attemptedQQOfficialBRs: [String] = [],
+        customHeaders: [String: String]? = nil
     ) {
         guard ensurePlaybackAllowed(), let loadedSong = currentSong else { return }
         if isThirdParty {
@@ -972,7 +1028,14 @@ final class PlayerManager: NSObject, ObservableObject {
         // playing，随后以 AVFoundation -11849 失败。
         let item: AVPlayerItem
         var playbackHeaders: [String: String] = [:]
-        if isQQAudioHost(url.host) {
+        if let customHeaders, !customHeaders.isEmpty {
+            // 插件音源自带的请求头（如 B 站必须带 Referer / User-Agent，否则 CDN 403）
+            playbackHeaders = customHeaders
+            let asset = AVURLAsset(url: url, options: [
+                "AVURLAssetHTTPHeaderFieldsKey": playbackHeaders
+            ])
+            item = AVPlayerItem(asset: asset)
+        } else if isQQAudioHost(url.host) {
             playbackHeaders = [
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:80.0) Gecko/20100101 Firefox/80.0",
                 "Referer": "https://y.qq.com/",
@@ -1262,6 +1325,9 @@ final class PlayerManager: NSObject, ObservableObject {
                 quality: quality,
                 excludedHosts: excludedHosts
             )
+        case .plugin:
+            // 插件音源不走第三方解锁链路，播放地址由 MFPluginManager 直接解析
+            return nil
         }
     }
 
@@ -1436,6 +1502,8 @@ final class PlayerManager: NSObject, ObservableObject {
                 return false
             }
             return user.vipBadge != nil
+        case .plugin:
+            return false
         }
     }
 
