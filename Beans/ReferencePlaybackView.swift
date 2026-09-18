@@ -204,6 +204,7 @@ struct ReferencePlaybackView: View {
                 active: localLibrary.containsSong(song)
             ) { onFavorite() }
             Menu {
+                Button("查看评论", action: onComments)
                 Button("定时关闭", action: onSleepTimer)
                 Button("添加到歌单", action: onAddToLocalPlaylist)
                 if downloadFeatureUnlocked {
@@ -322,6 +323,7 @@ struct ReferencePlaybackView: View {
                     onFavorite()
                 }
                 Menu {
+                    Button("查看评论", action: onComments)
                     Button("定时关闭", action: onSleepTimer)
                     Button("添加到歌单", action: onAddToLocalPlaylist)
                     if downloadFeatureUnlocked {

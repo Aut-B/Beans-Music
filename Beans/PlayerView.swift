@@ -648,6 +648,9 @@ struct PlayerView: View {
             Button("取消", role: .cancel) {}
         }
         .confirmationDialog("更多操作", isPresented: $showNativeMoreActions, titleVisibility: .visible) {
+            Button("查看评论") {
+                showComments = true
+            }
             Button("定时关闭") {
                 showSleepTimer = true
             }
@@ -843,6 +846,10 @@ struct PlayerView: View {
 
             Divider().overlay(Color.white.opacity(0.12))
 
+            moreActionRow("查看评论", systemName: "text.bubble") {
+                showMoreActions = false
+                showComments = true
+            }
             moreActionRow("定时关闭", systemName: player.sleepTimerRemaining > 0 ? "moon.zzz.fill" : "moon.zzz") {
                 showMoreActions = false
                 showSleepTimer = true
@@ -1030,6 +1037,7 @@ struct PlayerView: View {
             .buttonStyle(.plain)
 
             Menu {
+                Button("查看评论") { showComments = true }
                 Button("定时关闭") { showSleepTimer = true }
                 Button("添加到歌单") { showPlaylistPicker = true }
                 if downloadFeatureUnlocked {
@@ -1222,6 +1230,7 @@ struct PlayerView: View {
             .buttonStyle(.plain)
 
             Menu {
+                Button("查看评论") { showComments = true }
                 Button("定时关闭") { showSleepTimer = true }
                 Button("添加到歌单") { showPlaylistPicker = true }
                 if downloadFeatureUnlocked {

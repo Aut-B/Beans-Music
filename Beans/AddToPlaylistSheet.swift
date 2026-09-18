@@ -32,6 +32,16 @@ struct AddToPlaylistSheet: View {
     /// 云端接口不认，所以判据只看 `song.source`。
     private var canUseCloud: Bool { song.source == .netease }
 
+    /// 网易云只允许往「自己创建的歌单」加歌，收藏来的别人的歌单写接口一律拒绝。
+    /// 判据是歌单创建者和当前账号昵称是否一致；任一侧昵称拿不到就不拦，
+    /// 宁可让用户点一次看到真实报错，也不要凭猜测禁用掉能用的歌单。
+    private func isWritable(_ playlist: Playlist) -> Bool {
+        guard let me = auth.user?.nickname, !me.isEmpty,
+              !playlist.creatorName.isEmpty
+        else { return true }
+        return playlist.creatorName == me
+    }
+
     var body: some View {
         let _ = theme.accent
         BeansNavigationStack {
@@ -43,7 +53,7 @@ struct AddToPlaylistSheet: View {
                     Section {
                         Text(message)
                             .font(BeansFont.appFont(13))
-                            .foregroundStyle(Color.beansSage)
+                            .foregroundStyle(.red)
                     }
                 }
             }
@@ -164,6 +174,7 @@ struct AddToPlaylistSheet: View {
         } else {
             Section {
                 ForEach(auth.playlists) { playlist in
+                    let writable = isWritable(playlist)
                     Button {
                         Task { await add(to: playlist) }
                     } label: {
@@ -174,17 +185,23 @@ struct AddToPlaylistSheet: View {
                                     .font(BeansFont.appFont(15, .medium))
                                     .foregroundStyle(Color.beansLabel)
                                     .lineLimit(1)
-                                Text(beansSongCountText(playlist.trackCount))
-                                    .font(BeansFont.appFont(11))
-                                    .foregroundStyle(Color.beansComment)
+                                if writable {
+                                    Text(beansSongCountText(playlist.trackCount))
+                                        .font(BeansFont.appFont(11))
+                                        .foregroundStyle(Color.beansComment)
+                                } else {
+                                    Text("收藏的歌单，不能往里加歌")
+                                        .font(BeansFont.appFont(11))
+                                        .foregroundStyle(Color.beansComment)
+                                }
                             }
                             Spacer()
-                            Image(systemName: "icloud.and.arrow.up")
+                            Image(systemName: writable ? "icloud.and.arrow.up" : "lock")
                                 .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Color.beansSage)
+                                .foregroundStyle(writable ? Color.beansSage : Color.beansComment)
                         }
                     }
-                    .disabled(busy)
+                    .disabled(busy || !writable)
                 }
             } header: {
                 Text("网易云歌单")
@@ -251,24 +268,32 @@ struct AddToPlaylistSheet: View {
         dismiss()
     }
 
+    /// 整个流程钉在主线程上。
+    ///
+    /// 之前这两个方法是普通 async 函数，从 `Task {}` 里 `await` 之后会落到后台线程执行，
+    /// 于是改 `@State`、`dismiss()`、弹 Toast 全发生在后台线程上 —— 表现出来就是
+    /// 「点了按钮有按压动画，然后就没有然后了」：舱门不退、成功失败都不提示。
+    /// 网络请求本身自带 await 让出，不会卡住界面。
+    @MainActor
     private func add(to playlist: Playlist) async {
         busy = true
         defer { busy = false }
-        do {
-            let ok = try await NetEaseAPI.shared.addToPlaylist(playlistID: playlist.id, songIDs: [song.id])
-            if ok {
-                BeansHaptics.success()
-                ToastCenter.shared.show("已加入网易云歌单「\(playlist.name)」")
-                await auth.loadLibrary(force: true)
-                dismiss()
-            } else {
-                message = "添加失败，请确认这张网易云歌单是你自己创建的"
-            }
-        } catch {
-            message = error.localizedDescription
+        let result = await NetEaseAPI.shared.addToPlaylistDetailed(
+            playlistID: playlist.id,
+            songIDs: [song.id]
+        )
+        guard result.ok else {
+            BeansHaptics.tap()
+            message = result.message ?? "添加失败，请确认这张网易云歌单是你自己创建的"
+            return
         }
+        BeansHaptics.success()
+        ToastCenter.shared.show("已加入网易云歌单「\(playlist.name)」")
+        await auth.loadLibrary(force: true)
+        dismiss()
     }
 
+    @MainActor
     private func createCloudAndAdd() async {
         let name = newCloudName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
@@ -276,15 +301,19 @@ struct AddToPlaylistSheet: View {
         defer { busy = false }
         do {
             let playlistID = try await NetEaseAPI.shared.createPlaylist(name: name)
-            let ok = try await NetEaseAPI.shared.addToPlaylist(playlistID: playlistID, songIDs: [song.id])
-            if ok {
-                BeansHaptics.success()
-                ToastCenter.shared.show("已创建并加入「\(name)」")
-                await auth.loadLibrary(force: true)
-                dismiss()
-            } else {
-                message = "歌单已创建，但歌曲没有加进去，请稍后重试"
+            let result = await NetEaseAPI.shared.addToPlaylistDetailed(
+                playlistID: playlistID,
+                songIDs: [song.id]
+            )
+            guard result.ok else {
+                BeansHaptics.tap()
+                message = "歌单「\(name)」已创建，但歌曲没能加进去。\(result.message ?? "")"
+                return
             }
+            BeansHaptics.success()
+            ToastCenter.shared.show("已创建并加入「\(name)」")
+            await auth.loadLibrary(force: true)
+            dismiss()
         } catch {
             message = error.localizedDescription
         }

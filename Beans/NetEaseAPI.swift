@@ -13,6 +13,14 @@ final class NetEaseAPI {
     private let osver = "Microsoft-Windows-10-Professional-build-19045-64bit"
     private let channel = "netease"
 
+    // eapi 走的是手机端协议。header 里的 os / osver / appver 必须和 User-Agent 自洽，
+    // 服务端会拿它们和 UA 交叉比对，对不上就当成伪造客户端直接拒掉。
+    // 写歌单这类敏感接口走的就是 eapi，所以这组值不能沿用上面那套 PC 参数。
+    private let eapiOs = "iPhone OS"
+    private let eapiOsver = "16.2"
+    private let eapiAppver = "9.0.90"
+    private let eapiUA = "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)"
+
     private let nuid: String
     private let deviceId: String
     private let wnMcid: String
@@ -65,7 +73,7 @@ final class NetEaseAPI {
             form = "params=\(formEncode(enc["params"] ?? ""))"
             request = URLRequest(url: url)
             request.setValue(eapiCookieHeader(header: header), forHTTPHeaderField: "Cookie")
-            request.setValue("NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)", forHTTPHeaderField: "User-Agent")
+            request.setValue(eapiUA, forHTTPHeaderField: "User-Agent")
         }
 
         request.httpMethod = "POST"
@@ -127,16 +135,18 @@ final class NetEaseAPI {
 
     private func storeCookies(from response: HTTPURLResponse) {
         var changed = false
+        guard let url = response.url else { return }
         for (key, value) in response.allHeaderFields {
             guard let key = key as? String, key.lowercased() == "set-cookie",
-                  let value = value as? String, !value.isEmpty,
-                  let url = response.url
+                  let raw = value as? String, !raw.isEmpty
             else { continue }
-            let cookies = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": value], for: url)
-            for cookie in cookies where !cookie.value.isEmpty {
-                if storedCookies[cookie.name] != cookie.value {
-                    storedCookies[cookie.name] = cookie.value
-                    changed = true
+            for piece in Self.splitSetCookieHeader(raw) {
+                let cookies = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": piece], for: url)
+                for cookie in cookies where !cookie.value.isEmpty {
+                    if storedCookies[cookie.name] != cookie.value {
+                        storedCookies[cookie.name] = cookie.value
+                        changed = true
+                    }
                 }
             }
         }
@@ -145,6 +155,54 @@ final class NetEaseAPI {
                 UserDefaults.standard.set(data, forKey: cookiesKey)
             }
         }
+    }
+
+    /// 把一条可能含多个 cookie 的 `Set-Cookie` 拆成单条。
+    ///
+    /// URLSession 会把响应里同名的多个 `Set-Cookie` 合并成一个字符串，而
+    /// `HTTPCookie.cookies(withResponseHeaderFields:)` 对合并串的解析会被
+    /// `Expires` 值里的逗号带偏 —— 网易云登录正好把 `MUSIC_U` 和 `__csrf`
+    /// 分两段下发，一旦 `__csrf` 丢掉，读接口照常（只认 MUSIC_U），
+    /// 但写歌单这类要过 CSRF 校验的接口会一直失败。
+    /// 所以这里自己按「逗号后面跟的是不是日期」来判断该不该切。
+    private static func splitSetCookieHeader(_ raw: String) -> [String] {
+        var pieces: [String] = []
+        var current = ""
+        let chars = Array(raw)
+        var index = 0
+        while index < chars.count {
+            let c = chars[index]
+            if c == "," {
+                let tail = chars[(index + 1)...].drop { $0 == " " }
+                if looksLikeCookieDate(String(tail)) {
+                    current.append(c)
+                } else {
+                    pieces.append(current)
+                    current = ""
+                }
+            } else {
+                current.append(c)
+            }
+            index += 1
+        }
+        pieces.append(current)
+        return pieces
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// 判断逗号后面这段是不是 `Expires` 里的日期开头。
+    /// 网易云用的是 `01-Jan-1970 00:00:10 GMT` 这种写法，标准写法则是 `01 Jan 1970`。
+    private static func looksLikeCookieDate(_ text: String) -> Bool {
+        let head = String(text.prefix(12))
+        guard head.count >= 6 else { return false }
+        let patterns = [
+            "^[0-9]{1,2}-[A-Za-z]{3}-[0-9]{4}",
+            "^[0-9]{1,2} [A-Za-z]{3} [0-9]{4}",
+            "^[A-Za-z]{3}-[0-9]{1,2}-[0-9]{4}",
+            "^[A-Za-z]{3} [0-9]{1,2} [0-9]{4}",
+        ]
+        return patterns.contains { head.range(of: $0, options: .regularExpression) != nil }
     }
 
     private func weapiCookieHeader() -> String {
@@ -171,10 +229,10 @@ final class NetEaseAPI {
         let ts = String(Int(Date().timeIntervalSince1970 * 1000))
         let buildver = String(ts.prefix(10))
         var header: [String: String] = [
-            "osver": osver,
+            "osver": eapiOsver,
             "deviceId": deviceId,
-            "os": os,
-            "appver": appver,
+            "os": eapiOs,
+            "appver": eapiAppver,
             "versioncode": "140",
             "mobilename": "",
             "buildver": buildver,
@@ -635,17 +693,76 @@ final class NetEaseAPI {
     // MARK: - 歌单编辑
 
     func createPlaylist(name: String) async throws -> Int {
-        let json = try await request("/api/playlist/create", payload: ["name": name, "privacy": 0], crypto: "weapi")
-        guard let id = json["id"] as? Int else {
-            throw NetEaseError.unknown("创建歌单失败")
+        // 和加歌一样，创建接口也换过协议，weapi 不认时退回 eapi，并把服务端原话带出来。
+        var lastError: Error?
+        for crypto in ["weapi", "eapi"] {
+            do {
+                let json = try await request("/api/playlist/create", payload: ["name": name, "privacy": 0], crypto: crypto)
+                if let id = json["id"] as? Int, id > 0 { return id }
+                if let playlist = json["playlist"] as? [String: Any],
+                   let id = playlist["id"] as? Int, id > 0 { return id }
+                let message = json["message"] as? String ?? "code=\(json["code"] as? Int ?? -1)"
+                lastError = NetEaseError.unknown("创建歌单失败：\(message)")
+            } catch {
+                lastError = error
+            }
         }
-        return id
+        throw lastError ?? NetEaseError.unknown("创建歌单失败")
     }
 
     func addToPlaylist(playlistID: Int, songIDs: [Int]) async throws -> Bool {
-        let tracks = "[" + songIDs.map(String.init).joined(separator: ",") + "]"
-        let json = try await request("/api/playlist/manipulate/tracks", payload: ["op": "add", "pid": playlistID, "tracks": tracks], crypto: "weapi")
-        return (json["code"] as? Int) == 200
+        let result = await addToPlaylistDetailed(playlistID: playlistID, songIDs: songIDs)
+        if !result.ok {
+            throw NetEaseError.unknown(result.message ?? "添加失败")
+        }
+        return true
+    }
+
+    /// 把歌曲写进网易云歌单，返回 (是否成功, 失败原因)。
+    ///
+    /// 这个接口网易云改过好几轮：早期是 `weapi` + `tracks`（逗号串或 JSON 串），
+    /// 后来换成 `eapi` + `trackIds`（JSON 数组串）。传错组合时服务端不会告诉你
+    /// "参数名不对"，只回一个笼统的错误码，所以这里把所有已知组合按可能性依次试，
+    /// 谁先回 200 就用谁；全失败时把每次的真实错误码带回去，便于定位。
+    func addToPlaylistDetailed(playlistID: Int, songIDs: [Int]) async -> (ok: Bool, message: String?) {
+        let idList = songIDs.map(String.init)
+        let jsonArray = "[" + idList.joined(separator: ",") + "]"
+        let path = "/api/playlist/manipulate/tracks"
+        // pid 按字符串传、带上 imme，和网易云网页版点「添加到歌单」时发出的请求保持一致。
+        let pid = String(playlistID)
+
+        let attempts: [(label: String, crypto: String, payload: [String: Any])] = [
+            ("weapi/trackIds", "weapi", ["op": "add", "pid": pid, "trackIds": jsonArray, "imme": "true"]),
+            ("eapi/trackIds", "eapi", ["op": "add", "pid": pid, "trackIds": jsonArray, "imme": "true"]),
+            ("weapi/tracks", "weapi", ["op": "add", "pid": pid, "tracks": jsonArray]),
+            ("eapi/tracks", "eapi", ["op": "add", "pid": pid, "tracks": jsonArray]),
+        ]
+
+        var lastMessage: String?
+        for attempt in attempts {
+            do {
+                let json = try await request(path, payload: attempt.payload, crypto: attempt.crypto)
+                let code = json["code"] as? Int ?? -1
+                if code == 200 {
+                    BeansLogger.shared.log("网易云加歌成功［\(attempt.label)］pid=\(playlistID) ids=\(jsonArray)")
+                    return (true, nil)
+                }
+                let raw = json["message"] as? String ?? json["msg"] as? String ?? ""
+                var explain = ""
+                switch code {
+                case 502: explain = "（歌单不是自己的，或歌曲 id 无效）"
+                case 400: explain = "（参数被服务端拒绝）"
+                case 401, 250: explain = "（登录态已失效，重新登录网易云后再试）"
+                default: break
+                }
+                lastMessage = "网易云返回 code=\(code)\(raw.isEmpty ? "" : " \(raw)")\(explain)"
+                BeansLogger.shared.log("网易云加歌失败［\(attempt.label)］pid=\(playlistID) \(lastMessage ?? "")", level: .error)
+            } catch {
+                lastMessage = error.localizedDescription
+                BeansLogger.shared.log("网易云加歌异常［\(attempt.label)］\(error.localizedDescription)", level: .error)
+            }
+        }
+        return (false, lastMessage)
     }
 
     func removeFromPlaylist(playlistID: Int, songIDs: [Int]) async throws -> Bool {

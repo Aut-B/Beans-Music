@@ -160,6 +160,10 @@ struct CommentsSheet: View {
         return name.contains("bili") || name.contains("哔哩") || name.contains("b站")
     }
 
+    /// 钉在主线程：这个方法从头到尾都在写 `@State`，而它是个 async 函数，
+    /// 不加 `@MainActor` 会被调度到后台线程执行，UI 拿不到更新——
+    /// 表现出来就是「打开评论一直转圈」。网络请求本身会 await 让出，不会卡界面。
+    @MainActor
     private func load(reset: Bool) async {
         if reset {
             offset = 0
@@ -267,6 +271,7 @@ struct CommentsSheet: View {
     }
 
     /// QQ 评论翻页
+    @MainActor
     private func loadQQMore() async {
         qqPageNum += 1
         await load(reset: false)
@@ -330,6 +335,7 @@ struct CommentsSheet: View {
     }
 
     /// 拉一页插件评论；返回 false 表示这个音源没有可用的评论接口。
+    @MainActor
     private func loadPluginComments(page: Int) async throws -> Bool {
         // ① 插件自己实现了 MusicFree 的 getMusicComments（哔哩哔哩插件就有）
         let fetched = try await MFPluginManager.shared.pluginMusicComments(
@@ -404,6 +410,7 @@ struct CommentsSheet: View {
         .beansScrollContentBackgroundHidden()
     }
 
+    @MainActor
     private func loadMore() async {
         offset += limit
         await load(reset: false)
