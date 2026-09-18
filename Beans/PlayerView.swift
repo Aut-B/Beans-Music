@@ -768,6 +768,10 @@ struct PlayerView: View {
             .buttonStyle(GlassPressButtonStyle())
             .modifier(Layoutable(part: .topBack, enabled: layoutMode, data: $layoutData))
 
+            // 右侧现在有「评论 + 红心」两个按钮，左边补一个等宽透明位，
+            // 否则中间那组标题会被顶得偏左。
+            Color.clear.frame(width: 38, height: 38)
+
             Spacer(minLength: 0)
 
             Button {
