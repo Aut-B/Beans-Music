@@ -36,6 +36,9 @@ struct PlaylistView: View {
             return qqAuth.rawUin.isEmpty ? qqAuth.playlistUin : qqAuth.rawUin
         case .kugou:
             return KugouMusicAuth.shared.userId
+        case .plugin:
+            // 插件音源曲目不属于任何账号歌单，缓存键用平台名兜底。
+            return "plugin"
         }
     }
 

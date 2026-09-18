@@ -980,6 +980,9 @@ struct AlbumDetailView: View {
                         (try? await KugouMusicAPI.shared.searchSongs(keyword: query, limit: 100)) ?? []
                     }
                 )
+            case .plugin:
+                // MusicFree 插件音源只提供曲目，没有专辑维度，直接返回空结果。
+                result = []
             }
             if !result.isEmpty {
                 cache.save(result, for: cacheKey)

@@ -236,6 +236,7 @@ struct ProfileView: View {
             SettingsView()
                 .environmentObject(theme)
                 .environmentObject(player)
+                .environmentObject(auth)
                 .ignoresSafeArea(.all)
         }
         .sheet(isPresented: $showSectionSort) {
@@ -1130,6 +1131,10 @@ struct AccountHubSheet: View {
 
 struct SettingsView: View {
     @EnvironmentObject private var theme: ThemeStore
+    @EnvironmentObject private var auth: AuthStore
+    @EnvironmentObject private var player: PlayerManager
+    /// 插件音源条目数展示用；与 ProfileView 里的是同一个单例。
+    @ObservedObject private var pluginManager = MFPluginManager.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("beans.themeMode") private var themeModeRaw = BeansThemeMode.system.rawValue
