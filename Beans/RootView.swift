@@ -43,8 +43,9 @@ struct RootView: View {
     /// 底栏是否显示文字（关闭后只显示图标）
     @AppStorage("beans.tabLabelsVisible") private var tabLabelsVisible = true
     @AppStorage("beans.homeSource") private var homeSourceRaw = SearchProvider.netease.rawValue
-    /// 强制高刷新率：用于修复部分页面被系统稳定在 60Hz 的问题。
-    @AppStorage("beans.enableHighRefresh") private var enableHighRefresh = true
+    /// 强制锁频：把 App 钉在设备最高刷新率。默认关闭——ProMotion 本身会按需升到 120Hz，
+    /// 强制锁频只会让静止画面也满帧合成，徒增发热与掉帧。
+    @AppStorage(HighRefreshKeeper.defaultsKey) private var forceMaxRefresh = false
     @AppStorage("beans.legacyTabCornerRadius") private var legacyTabCornerRadius = 32.0
     @AppStorage("beans.legacyTabWidth") private var legacyTabWidth = 356.0
     @AppStorage("beans.legacyTabOffsetX") private var legacyTabOffsetX = 0.0
@@ -162,14 +163,10 @@ struct RootView: View {
             if disclaimerAccepted, ChangelogStore.shouldShowWhatsNew {
                 showWhatsNew = true
             }
-            enableHighRefresh = true
-            HighRefreshKeeper.shared.configure(enabled: true)
+            HighRefreshKeeper.shared.configureFromDefaults()
         }
-        .onChange(of: enableHighRefresh) { _ in
-            if !enableHighRefresh {
-                enableHighRefresh = true
-            }
-            HighRefreshKeeper.shared.configure(enabled: true)
+        .onChange(of: forceMaxRefresh) { value in
+            HighRefreshKeeper.shared.configure(enabled: value)
         }
         .onChange(of: disclaimerAccepted) { accepted in
             if accepted, ChangelogStore.shouldShowWhatsNew {

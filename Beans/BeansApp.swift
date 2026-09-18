@@ -17,7 +17,7 @@ struct BeansApp: App {
         _ = CrashReporter.shared
         // 主页暂停只应在设置页打开期间生效，避免异常退出后把暂停状态永久写入本地。
         UserDefaults.standard.set(false, forKey: "beans.pauseHomeRendering")
-        // 新安装默认开启高刷新率；老用户保留自己手动关闭的选择。
+        // 强制锁频默认关闭；ProMotion 由系统按需调度，用户可在设置里手动开启。
         HighRefreshKeeper.registerDefaults()
         HighRefreshKeeper.shared.configureFromDefaults()
         UserDefaults.standard.register(defaults: [

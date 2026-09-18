@@ -1142,8 +1142,8 @@ struct SettingsView: View {
     /// 第三方音源播放会员歌成功时提醒，默认开启
     @AppStorage("beans.showThirdPartyVIPNotice") private var showThirdPartyVIPNotice = true
     @AppStorage("beans.showSongVIPBadge") private var showSongVIPBadge = true
-    /// 高刷新率请求，默认开启
-    @AppStorage("beans.enableHighRefresh") private var enableHighRefresh = true
+    /// 强制锁频到设备最高刷新率，默认关闭（ProMotion 自会按需提频）
+    @AppStorage(HighRefreshKeeper.defaultsKey) private var forceMaxRefresh = false
     @AppStorage("beans.audio.mixothers.v1") private var mixesWithOthers = false
     @AppStorage("beans.audioQuality") private var playbackAudioQualityRaw = BeansAudioQuality.hires.rawValue
     @AppStorage(BeansHaptics.enabledKey) private var hapticsEnabled = true
@@ -2343,24 +2343,26 @@ struct SettingsView: View {
 
                 Divider().overlay(Color.beansComment.opacity(0.15))
 
-                HStack(spacing: 12) {
-                    Image(systemName: "speedometer")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color.beansAmber)
-                        .frame(width: 28)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("120Hz 高刷新")
-                            .font(BeansFont.appFont(15))
-                            .foregroundStyle(Color.beansLabel)
+                Toggle(isOn: $forceMaxRefresh) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "speedometer")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(beansLocalized("强制最高刷新率", "Force maximum refresh rate"))
+                                .font(BeansFont.appFont(15))
+                                .foregroundStyle(Color.beansLabel)
+                            Text(beansLocalized("把界面钉在设备最高刷新率。默认关闭：系统本就会按需提频，强制锁频会让静止画面也满帧合成，更费电且容易发热掉帧。", "Pins the UI to the display's maximum refresh rate. Off by default: the system already ramps up on demand, while forcing it keeps compositing at full rate even when nothing moves — draining battery and causing thermal throttling."))
+                                .font(BeansFont.appFont(11))
+                                .foregroundStyle(Color.beansComment)
+                        }
                     }
-                    Spacer()
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 17))
-                        .foregroundStyle(Color.beansAmber)
                 }
-                .onAppear {
-                    enableHighRefresh = true
-                    HighRefreshKeeper.shared.configure(enabled: true)
+                .toggleStyle(.switch)
+                .tint(Color.beansAmber)
+                .onChange(of: forceMaxRefresh) { value in
+                    HighRefreshKeeper.shared.configure(enabled: value)
                 }
 
                 Divider().overlay(Color.beansComment.opacity(0.15))
