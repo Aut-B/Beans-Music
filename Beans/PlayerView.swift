@@ -792,6 +792,25 @@ struct PlayerView: View {
             .modifier(Layoutable(part: .topTitle, enabled: layoutMode, data: $layoutData))
 
             Spacer(minLength: 0)
+
+            // 评论入口：一步直达，不必先进「⋯」菜单
+            Button {
+                BeansHaptics.tap()
+                guard song != nil else { return }
+                showComments = true
+            } label: {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(playerButtonText)
+                    .frame(width: 38, height: 38)
+                    .background {
+                        playerButtonSurface(size: 38)
+                    }
+                    .clipShape(Circle())
+            }
+            .buttonStyle(GlassPressButtonStyle())
+            .accessibilityLabel("查看评论")
+
             Button {
                 BeansHaptics.tap()
                 if let song {
@@ -1015,6 +1034,21 @@ struct PlayerView: View {
 
             Spacer(minLength: 0)
 
+            // 评论入口：放在红心左边，一步直达
+            Button {
+                BeansHaptics.tap()
+                guard song != nil else { return }
+                showComments = true
+            } label: {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(albumTitleForeground.opacity(0.82))
+                    .frame(width: 38, height: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看评论")
+
             Button {
                 BeansHaptics.tap()
                 guard let song else { return }
@@ -1215,6 +1249,21 @@ struct PlayerView: View {
             }
 
             Spacer(minLength: 0)
+
+            // 评论入口：放在红心左边，一步直达
+            Button {
+                BeansHaptics.tap()
+                guard song != nil else { return }
+                showComments = true
+            } label: {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(albumTitleForeground.opacity(0.82))
+                    .frame(width: 38, height: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看评论")
 
             Button {
                 BeansHaptics.tap()

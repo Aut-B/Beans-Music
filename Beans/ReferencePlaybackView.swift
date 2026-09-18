@@ -199,6 +199,9 @@ struct ReferencePlaybackView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            // 评论入口：放在红心左边，一步直达
+            compactActionButton(icon: "text.bubble") { onComments() }
+                .accessibilityLabel("查看评论")
             compactActionButton(
                 icon: localLibrary.containsSong(song) ? "heart.fill" : "heart",
                 active: localLibrary.containsSong(song)
@@ -316,6 +319,9 @@ struct ReferencePlaybackView: View {
             }
             Spacer(minLength: 0)
             HStack(spacing: 0) {
+                // 评论入口：放在红心左边，一步直达
+                compactActionButton(icon: "text.bubble") { onComments() }
+                    .accessibilityLabel("查看评论")
                 compactActionButton(
                     icon: localLibrary.containsSong(song) ? "heart.fill" : "heart",
                     active: localLibrary.containsSong(song)

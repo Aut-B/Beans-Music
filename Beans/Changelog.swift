@@ -48,6 +48,16 @@ enum ChangelogStore {
 
     static let logs: [VersionLog] = [
         VersionLog(
+            id: "1.8.2",
+            version: "1.8.2",
+            title: "评论入口提到顶栏",
+            features: [
+                "播放页右上角新增独立的评论按钮，就在红心左边，一步直达（原来要先点「⋯」再点「查看评论」）",
+                "黑胶页、歌曲页、Apple Music 版播放页的顶栏都已同步调整"
+            ],
+            fixes: []
+        ),
+        VersionLog(
             id: "1.8.1",
             version: "1.8.1",
             title: "修复网易云歌单加歌、评论入口",
