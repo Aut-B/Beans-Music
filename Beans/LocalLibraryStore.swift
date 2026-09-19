@@ -222,22 +222,61 @@ final class LocalLibraryStore: ObservableObject {
 
     // MARK: - 云端同步
 
+    /// 合并外部歌单（WebDAV 快照 / MusicFree 备份导入）时，遇到重复歌曲怎么处理。
+    /// - skip：保留本机已有版本，导入的跳过（默认）——反复导入不会越堆越多；
+    /// - replace：用导入的版本覆盖本机的——在别的设备上换过音源后，
+    ///   导入即可把修正后的条目带回来。
+    /// 重复的判定不只用 identityKey：歌名相同且时长差 ≤ 5 秒也算同一首，
+    /// 否则「同一首歌换了个音源」的条目会被当成新歌重复添加。
+    enum ImportDuplicatePolicy: String, CaseIterable {
+        case skip
+        case replace
+
+        var label: String {
+            switch self {
+            case .skip: return beansLocalized("跳过已有歌曲", "Skip existing songs")
+            case .replace: return beansLocalized("替换已有歌曲", "Replace existing songs")
+            }
+        }
+    }
+
     /// 合并外部歌单（WebDAV 快照 / MusicFree 备份导入）。
     ///
-    /// 同 id 或同名的歌单做**并集**：按 `identityKey` 去重后把云端独有的歌曲补进来，
-    /// 本机已有的顺序保持不变；本地没有的歌单整体追加。返回（新增歌单数, 新增歌曲数）。
+    /// 同 id 或同名的歌单做**并集**：按重复判定（见 ImportDuplicatePolicy）处理后
+    /// 把云端独有的歌曲补进来，本机已有的顺序保持不变；本地没有的歌单整体追加。
+    /// 返回（新增歌单数, 新增歌曲数）。
     @discardableResult
-    func merge(_ incoming: [LocalPlaylist]) -> (playlists: Int, songs: Int) {
+    func merge(_ incoming: [LocalPlaylist], duplicatePolicy: ImportDuplicatePolicy = .skip) -> (playlists: Int, songs: Int) {
         var addedPlaylists = 0
         var addedSongs = 0
         var result = playlists
         for remote in incoming {
             if let index = result.firstIndex(where: { $0.id == remote.id || $0.name == remote.name }) {
-                let existing = Set(result[index].songs.map(\.identityKey))
-                let fresh = remote.songs.filter { !existing.contains($0.identityKey) }
-                if !fresh.isEmpty {
-                    result[index].songs.append(contentsOf: fresh)
-                    addedSongs += fresh.count
+                var updated = result[index].songs
+                var freshCount = 0
+                for song in remote.songs {
+                    let pos = updated.firstIndex { candidate in
+                        candidate.identityKey == song.identityKey
+                            || (candidate.name == song.name && abs(candidate.duration - song.duration) <= 5)
+                    }
+                    switch duplicatePolicy {
+                    case .skip:
+                        if pos == nil {
+                            updated.append(song)
+                            freshCount += 1
+                        }
+                    case .replace:
+                        if let pos {
+                            updated[pos] = song
+                        } else {
+                            updated.append(song)
+                            freshCount += 1
+                        }
+                    }
+                }
+                if freshCount > 0 {
+                    result[index].songs = updated
+                    addedSongs += freshCount
                 }
             } else {
                 result.append(remote)

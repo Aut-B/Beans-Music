@@ -256,9 +256,14 @@ final class WebDAVSyncStore: ObservableObject {
 
     private static let configKey = "beans.webdav.config"
     private static let autoSyncKey = "beans.webdav.autoSync"
+    private static let duplicatePolicyKey = "beans.webdav.importDuplicatePolicy"
 
     @Published var config: WebDAVConfig
     @Published var autoSync: Bool
+    /// 导入 / 合并时遇到重复歌曲的处理方式（跳过 / 替换），见 ImportDuplicatePolicy。
+    @Published var duplicatePolicy: LocalLibraryStore.ImportDuplicatePolicy {
+        didSet { UserDefaults.standard.set(duplicatePolicy.rawValue, forKey: Self.duplicatePolicyKey) }
+    }
     @Published private(set) var status: Status = .idle
     @Published private(set) var remoteEntries: [WebDAVEntry] = []
 
@@ -273,6 +278,9 @@ final class WebDAVSyncStore: ObservableObject {
             config = WebDAVConfig()
         }
         autoSync = UserDefaults.standard.bool(forKey: Self.autoSyncKey)
+        duplicatePolicy = LocalLibraryStore.ImportDuplicatePolicy(
+            rawValue: UserDefaults.standard.string(forKey: Self.duplicatePolicyKey) ?? ""
+        ) ?? .skip
     }
 
     func saveConfig() {
@@ -344,12 +352,10 @@ final class WebDAVSyncStore: ObservableObject {
     func downloadAndMerge() async throws -> (playlists: Int, songs: Int) {
         guard config.isComplete else { throw WebDAVError.incomplete }
         let data = try await WebDAVClient.download(snapshotURLString, config: config)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let payload = try? decoder.decode(LocalLibraryPayload.self, from: data) else {
+        guard let playlists = Self.parseImport(data) else {
             throw WebDAVError.malformed
         }
-        return LocalLibraryStore.shared.merge(payload.playlists)
+        return LocalLibraryStore.shared.merge(playlists, duplicatePolicy: duplicatePolicy)
     }
 
     /// 用云端快照**替换**本机歌单（危险操作，界面需二次确认）。
@@ -371,9 +377,32 @@ final class WebDAVSyncStore: ObservableObject {
     func importRemoteFile(_ entry: WebDAVEntry) async throws -> (playlists: Int, songs: Int) {
         guard config.isComplete else { throw WebDAVError.incomplete }
         let data = try await WebDAVClient.download(entry.urlString, config: config)
+        guard let playlists = Self.parseImport(data) else {
+            throw WebDAVError.malformed
+        }
+        return LocalLibraryStore.shared.merge(playlists, duplicatePolicy: duplicatePolicy)
+    }
+
+    /// 导入解析。**先认 Beans 自己的快照**（`app == "Beans Music"`），
+    /// 走原生 Codable 完整往返 —— 歌手、封面、插件 rawJSON 一件不丢；
+    /// 认不出来再当 MusicFree 备份做递归猜。
+    ///
+    /// 之前这里吃过亏：把 Beans 快照也丢给 MusicFree 解析器，`source: "plugin"`
+    /// 被误读成平台名，`pluginItemID` / `pluginRawJSON` 全丢 —— 导入回来的歌
+    /// 「未知歌手、无封面、播不了」，identityKey 还变了，去重失效直接重复添加。
+    static func parseImport(_ data: Data) -> [LocalPlaylist]? {
+        if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           root["app"] as? String == "Beans Music" {
+            // 快照的日期字段（updatedAt / createdAt）是 iso8601 编码，解码策略必须对齐。
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let payload = try? decoder.decode(LocalLibraryPayload.self, from: data) {
+                let valid = payload.playlists.filter { !$0.songs.isEmpty }
+                if !valid.isEmpty { return valid }
+            }
+        }
         let imported = MusicFreeBackupImporter.parse(data)
-        guard !imported.isEmpty else { throw WebDAVError.malformed }
-        return LocalLibraryStore.shared.merge(imported)
+        return imported.isEmpty ? nil : imported
     }
 
     private static var deviceName: String {

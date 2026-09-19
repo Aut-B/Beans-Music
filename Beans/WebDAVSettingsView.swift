@@ -130,6 +130,27 @@ struct WebDAVSettingsView: View {
                     .font(BeansFont.appFont(14, .semibold))
                     .foregroundStyle(Color.beansLabel)
 
+                // 重复歌曲的处理方式：跳过（反复导入不堆重复）或替换（把别处修好的条目带回来）。
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(beansLocalized("导入时遇到重复的歌曲", "When importing duplicate songs"))
+                        .font(BeansFont.appFont(13, .medium))
+                        .foregroundStyle(Color.beansLabel)
+                    Picker("", selection: $sync.duplicatePolicy) {
+                        ForEach(LocalLibraryStore.ImportDuplicatePolicy.allCases, id: \.rawValue) { policy in
+                            Text(policy.label).tag(policy)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(beansLocalized(
+                        "同一首歌 = 来源标识相同，或歌名相同且时长差在 5 秒内。「跳过」保留本机版本，「替换」用导入的版本覆盖本机。",
+                        "A duplicate is the same source ID, or same title within 5 seconds of duration. Skip keeps the local version; Replace overwrites it with the imported one."
+                    ))
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.bottom, 2)
+
                 actionButton(
                     title: beansLocalized("上传本机歌单到云端", "Upload local playlists"),
                     icon: "arrow.up.to.line",

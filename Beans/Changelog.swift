@@ -48,6 +48,18 @@ enum ChangelogStore {
 
     static let logs: [VersionLog] = [
         VersionLog(
+            id: "1.9.1",
+            version: "1.9.1",
+            title: "WebDAV 导入修复",
+            features: [
+                "导入设置新增「重复歌曲处理」：跳过（反复导入不再堆重复）或替换（把别的设备上换好音源的条目带回来）；同一首歌按来源标识或「歌名相同 + 时长差 5 秒内」判定",
+                "导入云端文件时优先识别 Beans 自己导出的快照格式，完整还原歌手、封面与音源信息"
+            ],
+            fixes: [
+                "修复 WebDAV 导入 Beans 快照后歌曲变成「未知歌手、无封面、无法播放」的问题：之前快照被误当成 MusicFree 备份解析，插件音源的原始信息全部丢失"
+            ]
+        ),
+        VersionLog(
             id: "1.9.0",
             version: "1.9.0",
             title: "首选音源 pyncmd、逐曲换源",
