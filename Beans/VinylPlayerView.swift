@@ -60,7 +60,9 @@ struct VinylTurntableView: View {
         let stageHeight = discSize + armHeight * 0.38
 
         return ZStack(alignment: .top) {
-            TimelineView(.animation(paused: !isPlaying || isDragging || isTransitioningTrack)) { timeline in
+            // 30fps 足够表现唱片匀速旋转；默认的 `.animation` 是按屏幕最高刷新率
+            // 逐帧重绘（ProMotion 上 120Hz），GPU 一直满负荷 → 发热降频 → 反而更卡。
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isPlaying || isDragging || isTransitioningTrack)) { timeline in
                 let currentAngle = rotationState.currentAngle(at: timeline.date)
                 VinylRecordView(coverURL: coverURL, size: discSize)
                     .rotationEffect(.degrees(currentAngle))
@@ -373,7 +375,9 @@ struct VinylTonearmView: View {
             pivotBase(size: pivotSize)
                 .zIndex(3)
 
-            TimelineView(.animation(paused: !isPlaying || reduceMotion)) { timeline in
+            // 唱臂摆动同样限到 30fps：这段内容还带 shadow，逐帧重绘时
+            // 阴影要跟着重算，是播放页最贵的一处组合。
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isPlaying || reduceMotion)) { timeline in
                 let wobble = wobbleDegrees(at: timeline.date)
                 armAssembly(width: width, height: height)
                     .rotationEffect(

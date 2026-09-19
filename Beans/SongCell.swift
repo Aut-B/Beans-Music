@@ -25,7 +25,6 @@ struct SongCell: View {
     @State private var showComments = false
     @State private var showRebind = false
     @State private var shareFile: ShareFileItem?
-    @State private var appeared = false
 
     private var isCurrent: Bool {
         player.currentSong?.identityKey == song.identityKey
@@ -175,15 +174,15 @@ struct SongCell: View {
                 rowContent
                     .padding(.horizontal, 10)
                     .background {
-                                            BeansGlass(shape: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        // 行底用廉价版玻璃：长列表滚动时不再逐行做实时模糊。
+                        BeansRowBackground(cornerRadius: 16)
                     }
             } else {
                 rowContent
             }
         }
-        .opacity(appeared ? 1 : 0)
-        .offset(y: appeared ? 0 : 8)
-        .animation(.easeOut(duration: 0.28), value: appeared)
-        .onAppear { appeared = true }
+        // 这里原本还有一行「每行出现时淡入 + 上移」的动画。长列表里它意味着
+        // 滚动过程中不断有新行起动画（每行 0.28s），是持续的额外绘制；
+        // 换成一次性渲染后滚动手感更跟手，视觉上只是少了那点淡入。
     }
 }

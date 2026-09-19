@@ -4789,7 +4789,8 @@ struct CoverSpin: ViewModifier {
 
     func body(content: Content) -> some View {
         if enabled {
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { context in
+            // 封面匀速自转，30fps 与 60fps 肉眼无差；改 60→30 直接省掉一半逐帧重绘。
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isPlaying)) { context in
                 let angle = (context.date.timeIntervalSinceReferenceDate * 15)
                     .truncatingRemainder(dividingBy: 360)
                 return content

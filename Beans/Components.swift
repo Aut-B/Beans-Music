@@ -122,15 +122,32 @@ struct GlassBackdrop: View {
                 LinearGradient.beansBackdrop
             }
             if uiStyle != .nativeClean {
+                // 这两团装饰光晕原先写成「实心圆 + .blur(radius: 100/110)」：
+                // 半径 100 以上的高斯模糊作用在 340pt 的圆上，是整屏最贵的一次
+                // 离屏渲染，而 GlassBackdrop 几乎每个页面都在用 —— iPhone 12 发热
+                // 降频之后首当其冲。换成等效的径向渐变：观感同样是柔和光团，
+                // 但只是一次普通的渐变填充，几乎不花 GPU。
                 Circle()
-                    .fill(Color.beansAmber.opacity(0.14))
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.beansAmber.opacity(0.22), Color.beansAmber.opacity(0)],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 170
+                        )
+                    )
                     .frame(width: 340, height: 340)
-                    .blur(radius: 100)
                     .offset(x: 150, y: -300)
                 Circle()
-                    .fill(Color.beansSage.opacity(0.12))
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.beansSage.opacity(0.20), Color.beansSage.opacity(0)],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 150
+                        )
+                    )
                     .frame(width: 300, height: 300)
-                    .blur(radius: 110)
                     .offset(x: -160, y: 340)
             }
         }
@@ -221,6 +238,34 @@ struct BeansSurface<S: Shape>: View {
 
     var body: some View {
         BeansGlass(shape: shape)
+    }
+}
+
+// MARK: - 列表行底（廉价版玻璃）
+
+/// 长列表里每一行的底：**不做实时模糊**。
+///
+/// 原先行底用 `BeansGlass`（液态玻璃 = `.ultraThinMaterial`），一屏十几行就是
+/// 十几个实时模糊层，滚动时每帧都要重新离屏合成 —— 这是 iPhone 12 上
+/// 「一滚就掉帧、一会儿就发热」最直接的原因。这里换成同色系的半透明填充：
+/// 视觉上仍是那层清透的行底（背景本就是一层静态模糊，观感差别很小），
+/// 但只是一次普通填充，滚动时几乎不花 GPU。
+struct BeansRowBackground: View {
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
+
+    var cornerRadius: CGFloat = 16
+
+    private var uiStyle: BeansUIStyle {
+        uiStyleRaw == "outline" ? .clear : (BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid)
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        shape
+            .fill(Color.beansGlassFill.opacity(uiStyle == .nativeClean ? 0.72 : 0.80))
+            .overlay(
+                shape.strokeBorder(.white.opacity(uiStyle == .nativeClean ? 0.06 : 0.10), lineWidth: 0.6)
+            )
     }
 }
 
@@ -495,9 +540,15 @@ struct CoverImage: View {
     // 这里缓存命中时在首帧就同步出图，不再闪。
     @StateObject private var loader = CoverImageLoader()
 
+    /// 期望的最大像素边长：按显示尺寸 × 屏幕倍率算，再交给缓存分档。
+    /// 行内 46pt 只需 256 档，播放页大封面取 1280 档——不把原图整张解进内存。
+    private var maxPixel: CGFloat {
+        size * UIScreen.main.scale
+    }
+
     private var resolvedImage: UIImage? {
-        if let cached = CoverImageCache.memoryImage(for: url) { return cached }
-        return loader.image(for: url)
+        if let cached = CoverImageCache.memoryImage(for: url, maxPixel: maxPixel) { return cached }
+        return loader.image(for: url, maxPixel: maxPixel)
     }
 
     var body: some View {
@@ -526,7 +577,11 @@ struct CoverImage: View {
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .task(id: url) { loader.load(url) }
+            // id 里带上像素档：同一个 URL 但视图变大（进播放页/横屏）时要重新取大图，
+            // 只按 url 做 id 会在尺寸变化后一直卡在占位图。
+            .task(id: "\(url?.absoluteString ?? "")|\(CoverImageCache.bucket(forPixel: maxPixel))") {
+                loader.load(url, maxPixel: maxPixel)
+            }
     }
 
     private var placeholderIcon: some View {

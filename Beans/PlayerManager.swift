@@ -1,4 +1,5 @@
 import AVFoundation
+import ImageIO
 import MediaPlayer
 import SwiftUI
 import UIKit
@@ -124,7 +125,14 @@ final class PlayerManager: NSObject, ObservableObject {
     private var qqThirdPartyFallbackSongKey: String?
     private var playbackConfirmationWorkItem: DispatchWorkItem?
     private var playbackStallWorkItem: DispatchWorkItem?
-    private static let nowPlayingArtworkCache = NSCache<NSURL, UIImage>()
+    /// 锁屏/系统「正在播放」的封面缓存。
+    /// 加上 cost 上限并按 600 像素解码：锁屏只需这么大，
+    /// 原先是把每首歌的原图（可能 3000×3000）整张解出来存着，几张就上百 MB。
+    private static let nowPlayingArtworkCache: NSCache<NSURL, UIImage> = {
+        let cache = NSCache<NSURL, UIImage>()
+        cache.totalCostLimit = 24 * 1024 * 1024
+        return cache
+    }()
 
     private let historyKey = "beans.history"
     private let countsKey = "beans.playcounts"
@@ -1779,6 +1787,22 @@ final class PlayerManager: NSObject, ObservableObject {
 
     // MARK: - 系统正在播放
 
+    /// 按最大边长解码缩略图（走 ImageIO，只解出需要的那一层）。
+    private static func downsampledArtwork(_ data: Data, maxPixel: Int) -> UIImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cg)
+    }
+
     private func updateNowPlaying() {
         guard let song = currentSong else { return }
         var info: [String: Any] = [
@@ -1796,12 +1820,18 @@ final class PlayerManager: NSObject, ObservableObject {
             } else if lastNowPlayingArtworkKey != artworkKey {
                 lastNowPlayingArtworkKey = artworkKey
                 Task {
-                    if let data = try? Data(contentsOf: artworkURL), let image = UIImage(data: data) {
-                        Self.nowPlayingArtworkCache.setObject(image, forKey: artworkURL as NSURL)
-                        var updated = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-                        updated[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-                        MPNowPlayingInfoCenter.default().nowPlayingInfo = updated
-                    }
+                    // 走 URLSession + 600 像素缩略图：不再用 Data(contentsOf:) 同步阻塞，
+                    // 也不把原图整张解进内存（锁屏只用得到这么大）。
+                    var request = URLRequest(url: artworkURL)
+                    request.timeoutInterval = 15
+                    request.cachePolicy = .returnCacheDataElseLoad
+                    guard let (data, _) = try? await URLSession.shared.data(for: request),
+                          let image = Self.downsampledArtwork(data, maxPixel: 600) else { return }
+                    let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
+                    Self.nowPlayingArtworkCache.setObject(image, forKey: artworkURL as NSURL, cost: cost)
+                    var updated = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                    updated[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = updated
                 }
             }
         } else {

@@ -84,17 +84,23 @@ final class LocalLibraryStore: ObservableObject {
     func addSong(_ song: Song, to id: UUID) {
         guard let idx = playlists.firstIndex(where: { $0.id == id }) else { return }
         guard !playlists[idx].songs.contains(where: { $0.identityKey == song.identityKey }) else { return }
-        playlists[idx].songs.append(song)
+        // 新加入的歌放**最上面**：刚加完就能直接看到，不用滚到几百首的末尾去找。
+        playlists[idx].songs.insert(song, at: 0)
     }
 
     @discardableResult
     func addSongs(_ songs: [Song], to id: UUID) -> Int {
-        let before = playlists.first(where: { $0.id == id })?.songs.count ?? 0
-        for song in songs {
-            addSong(song, to: id)
+        guard let idx = playlists.firstIndex(where: { $0.id == id }) else { return 0 }
+        var seen = Set(playlists[idx].songs.map(\.identityKey))
+        var fresh: [Song] = []
+        for song in songs where seen.insert(song.identityKey).inserted {
+            fresh.append(song)
         }
-        let after = playlists.first(where: { $0.id == id })?.songs.count ?? before
-        return after - before
+        guard !fresh.isEmpty else { return 0 }
+        // 整批插到最前面并保持传入顺序
+        //（逐首 insert(at: 0) 会把选中顺序整个倒过来）。
+        playlists[idx].songs.insert(contentsOf: fresh, at: 0)
+        return fresh.count
     }
 
     /// 调整歌单内歌曲顺序（List 拖动排序的结果），顺序随歌单一起持久化。
