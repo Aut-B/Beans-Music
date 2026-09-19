@@ -1275,7 +1275,9 @@ final class PlayerManager: NSObject, ObservableObject {
                 if abs(time.seconds - self.lastPublishedProgress) >= 0.18 {
                     self.lastPublishedProgress = time.seconds
                     self.progress = time.seconds
-                    if abs(time.seconds - self.lastPersistedProgress) >= 2.0 {
+                    // 断点续播的位置每 15 秒落一次盘就够（暂停/切歌/拖动进度时另有即时保存），
+                    // 原先的 2 秒一次是拿「整个队列重新编码」的代价换进度精度，不划算。
+                    if abs(time.seconds - self.lastPersistedProgress) >= 15.0 {
                         self.lastPersistedProgress = time.seconds
                         self.savePersistedPlaybackState()
                     }
@@ -1755,8 +1757,14 @@ final class PlayerManager: NSObject, ObservableObject {
             duration: duration,
             savedAt: Date()
         )
-        if let data = try? JSONEncoder().encode(state) {
-            defaults.set(data, forKey: playbackStateKey)
+        // 队列里可能有几百首、每首还带插件原始 JSON，编码 + 写 UserDefaults 并不便宜；
+        // 原先在主线程（timeObserver 的 queue 是 .main）同步做，播放中每 2 秒要卡一下。
+        // 这里改成：主线程只取一份值快照，编码与落盘放后台队列。
+        let key = playbackStateKey
+        DispatchQueue.global(qos: .utility).async {
+            if let data = try? JSONEncoder().encode(state) {
+                UserDefaults.standard.set(data, forKey: key)
+            }
         }
     }
 
