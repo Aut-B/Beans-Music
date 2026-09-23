@@ -97,48 +97,74 @@ final class BeansLogger: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.entries = []
         }
-        try? FileManager.default.removeItem(at: logDirectory)
+        Self.writeQueue.sync {
+            cachedDayStamp = nil
+            cachedDayURL = nil
+            try? FileManager.default.removeItem(at: logDirectory)
+        }
         log("日志已清空", level: .info)
     }
 
     // MARK: - 文件持久化
 
     private var logDirectory: URL {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BeansLogs", isDirectory: true)
+    }
+
+    /// 落盘队列：日志写入原先同步发生在**调用线程**上 ——
+    /// 一次 log() 就是 createDirectory + stat + open/seek/write/close 一串系统调用，
+    /// 而调用方大量来自主线程（UI 事件、播放状态变化、音源解析失败……）。
+    /// 现在统一丢进这条串行队列，主线程只剩一次入队。
+    private static let writeQueue = DispatchQueue(label: "beans.logger.write", qos: .utility)
+    /// 以下两个缓存只在 writeQueue 上访问
+    private var cachedDayStamp: String?
+    private var cachedDayURL: URL?
+
+    /// 仅 writeQueue 上调用：同一天的日志文件 URL 只解析一次
+    /// （原先每条日志都要走一次 createDirectory + DateFormatter）。
+    private func currentFileURL() -> URL {
+        let stamp = Self.fileStampFormatter.string(from: Date())
+        if cachedDayStamp == stamp, let cachedDayURL { return cachedDayURL }
+        let dir = logDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
-    private var currentFileURL: URL {
-        logDirectory.appendingPathComponent("beans-\(Self.fileStampFormatter.string(from: Date())).log")
-    }
-
-    /// 导出日志文件（不存在则先生成一份完整日志）
-    func exportLogURL() -> URL {
-        let url = currentFileURL
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try? fullText.write(to: url, atomically: true, encoding: .utf8)
-        }
+        let url = dir.appendingPathComponent("beans-\(stamp).log")
+        cachedDayStamp = stamp
+        cachedDayURL = url
         return url
     }
 
-    private func write(_ line: String) {
-        let url = currentFileURL
-        // 单日日志过大时轮转到 .1，避免无限膨胀
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
-        if fileSize > maxLogFileBytes {
-            let rotated = url.deletingPathExtension().appendingPathExtension("1.log")
-            try? FileManager.default.removeItem(at: rotated)
-            try? FileManager.default.moveItem(at: url, to: rotated)
+    /// 导出日志文件（不存在则先生成一份完整日志）。
+    /// 走 writeQueue.sync，顺带把还在队列里排队的日志刷完，导出的才是最新内容。
+    func exportLogURL() -> URL {
+        Self.writeQueue.sync {
+            let url = currentFileURL()
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try? fullText.write(to: url, atomically: true, encoding: .utf8)
+            }
+            return url
         }
+    }
+
+    private func write(_ line: String) {
         let payload = (line + "\n").data(using: .utf8) ?? Data()
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            handle.seekToEndOfFile()
-            handle.write(payload)
-        } else {
-            try? payload.write(to: url, options: .atomic)
+        Self.writeQueue.async { [weak self] in
+            guard let self else { return }
+            let url = self.currentFileURL()
+            // 单日日志过大时轮转到 .1，避免无限膨胀
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+            if fileSize > self.maxLogFileBytes {
+                let rotated = url.deletingPathExtension().appendingPathExtension("1.log")
+                try? FileManager.default.removeItem(at: rotated)
+                try? FileManager.default.moveItem(at: url, to: rotated)
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                handle.seekToEndOfFile()
+                handle.write(payload)
+            } else {
+                try? payload.write(to: url, options: .atomic)
+            }
         }
     }
 }

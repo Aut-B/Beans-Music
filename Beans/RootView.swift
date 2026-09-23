@@ -582,7 +582,9 @@ private struct KumoneGlassTabBar: View {
         }
         .frame(height: contentHeight)
         .padding(innerInset)
-        .background { Capsule().fill(.regularMaterial) }
+        // 悬浮标签栏常驻屏底、又压在滚动内容之上：`.regularMaterial` 会逐帧重新卷积背后的
+        // 内容，是滚动掉帧里最稳定的一笔。换成静态面板底，观感几乎不变。
+        .background { Capsule().fill(Color.beansGlassSurface) }
         .overlay {
             Capsule()
                 .strokeBorder(.white.opacity(colorScheme == .dark ? 0.08 : 0.20), lineWidth: 0.5)

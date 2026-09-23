@@ -187,41 +187,36 @@ struct BeansGlass<S: Shape>: View {
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
 
     let shape: S
+    /// 仅为兼容既有调用点保留。改用静态面板后，「是否液态玻璃」不再影响渲染方式。
     var forceLiquid = false
 
     private var uiStyle: BeansUIStyle {
         uiStyleRaw == "outline" ? .clear : (BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid)
     }
 
-    private var isLiquid: Bool {
-        forceLiquid || uiStyle == .liquid || uiStyle == .nativeClean
+    /// 面板浓淡：Apple 简洁样式本来就该「低存在感」，比其余样式再淡一档。
+    private var surfaceOpacity: Double {
+        uiStyle == .nativeClean ? 0.95 : 1.0
     }
 
+    /// 描边用 `Color.primary`：浅色模式下是深色细线、深色模式下是浅色细线，两头都看得见。
+    /// 去掉实时模糊之后，一道细边是让面板「立起来」最省成本的办法。
+    private var strokeColor: Color {
+        Color.primary.opacity(uiStyle == .nativeClean ? 0.05 : 0.08)
+    }
+
+    // 这里曾经是 `.ultraThinMaterial`（iOS 26 上是 `.glassEffect`）——两者都是**实时**背景模糊，
+    // 每一层都要在它背后的内容变化时重新离屏卷积。卡片、按钮、底部浮岛都压在滚动内容之上，
+    // 滚动时逐帧付费，iPhone 12 发热降频之后就是肉眼可见的掉帧。
+    // 现在换成一块静态半透明面板：观感仍是「压着一层背景的清透玻璃」，但不参与实时渲染。
+    // 全屏播放页自带的整屏封面模糊是另一套实现（切歌时一次生成、前台静态显示），不受影响。
+    // 注意：`shape` 是泛型 `S: Shape`（不是 InsettableShape），描边只能用 `.stroke`。
     var body: some View {
-        if isLiquid {
-            if #available(iOS 26, *) {
-                GlassEffectContainer {
-                    shape
-                        .fill(.clear)
-                        .glassEffect(.clear, in: shape)
-                }
-            } else {
-                shape
-                    .fill(.ultraThinMaterial)
-            }
-        } else {
-            switch uiStyle {
-            case .clear, .liquid:
-                shape
-                    .fill(.ultraThinMaterial)
-            case .compact:
-                shape
-                    .fill(Color.beansGlassFill.opacity(0.74))
-            case .nativeClean:
-                shape
-                    .fill(Color.beansGlassFill.opacity(0.62))
-            }
-        }
+        shape
+            .fill(Color.beansGlassSurface.opacity(surfaceOpacity))
+            .overlay(
+                shape.stroke(strokeColor, lineWidth: 0.6)
+            )
     }
 }
 
@@ -280,10 +275,6 @@ struct GlassCard<Content: View>: View {
         uiStyleRaw == "outline" ? .clear : (BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid)
     }
 
-    private var isLiquid: Bool {
-        uiStyle == .liquid || uiStyle == .nativeClean
-    }
-
     private var resolvedCornerRadius: CGFloat {
         if uiStyle == .compact { return min(cornerRadius, 16) }
         if uiStyle == .nativeClean { return min(cornerRadius, 18) }
@@ -296,33 +287,25 @@ struct GlassCard<Content: View>: View {
         return 16
     }
 
+    private var surfaceOpacity: Double {
+        uiStyle == .nativeClean ? 0.95 : 1.0
+    }
+
+    // 与 BeansGlass 同理：卡片底不再用实时材质模糊，换成静态半透明面板 + 细描边。
+    // （不写显式 `return` —— body 是 @ViewBuilder 上下文，`let` + `return` 会被拒绝。）
     var body: some View {
-        if isLiquid {
-            if #available(iOS 26, *) {
-                GlassEffectContainer {
-                    content()
-                        .padding(resolvedPadding)
-                        .glassEffect(.clear, in: .rect(cornerRadius: resolvedCornerRadius))
-                }
-                .beansCardShadow(radius: 9, y: 3)
-            } else {
-                content()
-                    .padding(resolvedPadding)
-                    .background(RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous).fill(.ultraThinMaterial))
-                    .clipShape(RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous))
-                    .beansCardShadow(radius: 9, y: 3)
-            }
-        } else {
-            content()
-                .padding(resolvedPadding)
-                .background {
-                    RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous)
-                        .fill(uiStyle == .compact ? Color.beansGlassFill.opacity(0.72) : Color.clear)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous))
-                }
-                .clipShape(RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous))
-                .beansCardShadow(radius: 9, y: 3)
-        }
+        content()
+            .padding(resolvedPadding)
+            .background(
+                RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous)
+                    .fill(Color.beansGlassSurface.opacity(surfaceOpacity))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.6)
+                    )
+            )
+            .clipShape(RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous))
+            .beansCardShadow(radius: 9, y: 3)
     }
 }
 
@@ -693,7 +676,7 @@ struct GlassButton: View {
                 } else if isNativeClean {
                     Capsule().fill(Color.primary.opacity(0.055))
                 } else {
-                    Capsule().fill(.thinMaterial)
+                    Capsule().fill(Color.beansGlassSurface)
                 }
             }
             .overlay {
@@ -962,7 +945,7 @@ struct ToastView: View {
             .padding(.vertical, 10)
             .background {
                 Capsule()
-                    .fill(.ultraThinMaterial)
+                    .fill(Color.beansGlassSurface)
                     .overlay {
                         Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.8)
                     }

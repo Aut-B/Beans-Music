@@ -12,6 +12,9 @@ struct LocalMusicSection: View {
     }
 
     @ObservedObject private var store = LocalLibraryStore.shared
+    /// 区块标题。用字符串传入，是为了让「我的」页面把它整段铺进页面时
+    /// 换成「本地歌单」，而音乐库那边仍叫「本地音乐库」—— 同一份实现两处复用。
+    var headerTitle: String = "本地音乐库"
     @EnvironmentObject private var player: PlayerManager
     @EnvironmentObject private var auth: AuthStore
     @EnvironmentObject private var favorites: FavoritesStore
@@ -43,7 +46,7 @@ struct LocalMusicSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("本地音乐库")
+                Text(LocalizedStringKey(headerTitle))
                     .font(BeansFont.appFont(21, .bold))
                     .foregroundStyle(Color.beansLabel)
                 Spacer(minLength: 8)

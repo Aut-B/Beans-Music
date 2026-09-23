@@ -52,6 +52,20 @@ extension UIColor {
         light: UIColor(white: 0.96, alpha: 0.55),
         dark: UIColor(white: 0.07, alpha: 0.55)
     )
+    /// 静态玻璃面板底：**用来替代 `.ultraThinMaterial`**。
+    ///
+    /// iOS 的材质是"实时"背景模糊 —— 每一层都要在它背后的内容发生变化时重新离屏卷积。
+    /// 卡片、按钮、底部浮岛（标签栏 + 迷你播放器）全都压在滚动内容之上，滚动时逐帧付费，
+    /// 发热降频之后就是肉眼可见的掉帧。这里换成一次静态绘制：
+    /// 观感仍是"压着一层背景的清透面板"，但不参与任何实时渲染。
+    /// 全屏播放页自带的封面模糊是另一套实现（一次生成 + 静态显示），不受此处影响。
+    ///
+    /// 取色是照着材质的样子配的：浅色模式下 `.ultraThinMaterial` 压在纯白上约等于 #F1F1F3
+    /// （比背景略深一档，卡片才立得起来），深色模式下约等于 #1D1D20（比背景略浅一档）。
+    static let beansGlassSurface = beansDynamic(
+        light: UIColor(white: 0.945, alpha: 0.92),
+        dark: UIColor(white: 0.135, alpha: 0.90)
+    )
 }
 
 extension Color {
@@ -70,6 +84,8 @@ extension Color {
     static var beansAmber: Color { Color(uiColor: .beansAmber) }
     static let beansSage = Color(uiColor: .beansSage)
     static let beansGlassFill = Color(uiColor: .beansGlassFill)
+    /// 静态玻璃面板底（替代 `.ultraThinMaterial`，见 UIColor 侧注释）
+    static let beansGlassSurface = Color(uiColor: .beansGlassSurface)
     /// 当前配色主题的高亮色（播放器进度点 / 光斑 / 歌词高亮等）
     static var beansHighlight: Color {
         ThemeStore.shared.customAccent ?? AccentTheme.current.highlight
