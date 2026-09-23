@@ -405,6 +405,21 @@ final class WebDAVSyncStore: ObservableObject {
         return imported.isEmpty ? nil : imported
     }
 
+    /// 把本机歌单编码成与云端快照同一格式的 JSON，供「备份」按钮导出成文件。
+    /// 与 `parseImport` 共用一套格式，所以导出的文件既能在本机「恢复」读回来，
+    /// 也能直接丢进 WebDAV 目录当作快照使用。
+    static func encodeSnapshot(_ playlists: [LocalPlaylist]) -> Data? {
+        let payload = LocalLibraryPayload(
+            updatedAt: Date(),
+            device: deviceName,
+            playlists: playlists
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? encoder.encode(payload)
+    }
+
     private static var deviceName: String {
         #if targetEnvironment(simulator)
         return "Simulator"

@@ -26,6 +26,12 @@ struct LocalMusicSection: View {
     @State private var syncMessage = ""
     @State private var showSyncPicker = false
     @State private var selectedSyncTargets: Set<SyncTarget> = []
+    /// 歌单备份/恢复。原先这两个动作埋在「设置 → 备份与恢复」里，
+    /// 要翻两层才够得着，改到「一键同步歌单」旁边直接放按钮。
+    @State private var showLocalBackupShare = false
+    @State private var localBackupURL: URL?
+    @State private var showLocalRestorePicker = false
+    @State private var localRestoreMessage = ""
 
     private var emptyLocalPlaylistText: String {
         if languageRaw == AppLanguage.english.rawValue {
@@ -64,17 +70,30 @@ struct LocalMusicSection: View {
                 .help("排序本地歌单")
             }
             VStack(alignment: .leading, spacing: 6) {
-                GlassButton(
-                    title: syncing ? "正在同步歌单…" : "一键同步歌单",
-                    systemName: "arrow.triangle.2.circlepath",
-                    prominent: true
-                ) {
-                    showSyncPicker = true
+                HStack(spacing: 8) {
+                    GlassButton(
+                        title: syncing ? "正在同步歌单…" : "一键同步歌单",
+                        systemName: "arrow.triangle.2.circlepath",
+                        prominent: true
+                    ) {
+                        showSyncPicker = true
+                    }
+                    .disabled(syncing)
+                    localPlaylistActionButton(systemName: "square.and.arrow.up", label: "备份") {
+                        exportLocalPlaylists()
+                    }
+                    localPlaylistActionButton(systemName: "square.and.arrow.down", label: "恢复") {
+                        showLocalRestorePicker = true
+                    }
                 }
-                .disabled(syncing)
-                Text("选择两个或三个平台，合并同步到一个本地歌单")
+                Text("选择两个或三个平台，合并同步到一个本地歌单；右侧「备份 / 恢复」只针对本机歌单")
                     .font(BeansFont.appFont(11))
                     .foregroundStyle(Color.beansComment)
+            }
+            if !localRestoreMessage.isEmpty {
+                Text(localRestoreMessage)
+                    .font(BeansFont.appFont(12, .medium))
+                    .foregroundStyle(Color.beansSage)
             }
             if !syncMessage.isEmpty {
                 Text(syncMessage)
@@ -178,11 +197,105 @@ struct LocalMusicSection: View {
             LocalPlaylistOrderSheet()
                 .environmentObject(theme)
         }
+        .sheet(isPresented: $showLocalBackupShare, onDismiss: cleanupLocalBackupFile) {
+            if let localBackupURL {
+                ShareSheet(items: [localBackupURL])
+            }
+        }
+        .sheet(isPresented: $showLocalRestorePicker) {
+            BackupDocumentPicker { url in
+                showLocalRestorePicker = false
+                handleLocalRestore(from: url)
+            }
+        }
         .sheet(item: $selected) { playlist in
             LocalPlaylistDetailSheet(playlistID: playlist.id)
                 .environmentObject(player)
                 .environmentObject(auth)
         }
+    }
+
+    /// 「一键同步歌单」旁边的小胶囊按钮。
+    /// GlassButton 是整行的主按钮，备份/恢复分量轻一些，做成图标 + 短文字并排摆在同一行。
+    private func localPlaylistActionButton(
+        systemName: String,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            BeansHaptics.tap()
+            action()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: systemName)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(label)
+                    .font(BeansFont.appFont(12, .medium))
+            }
+            .foregroundStyle(Color.beansLabel)
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background { BeansSurface(shape: Capsule()) }
+            .overlay {
+                Capsule().strokeBorder(Color.beansLabel.opacity(0.10), lineWidth: 0.8)
+            }
+        }
+        .buttonStyle(GlassPressButtonStyle(scale: 0.95))
+        .accessibilityLabel(label)
+    }
+
+    /// 导出本机歌单：写一份与 WebDAV 快照同格式的 JSON 到临时目录，交给系统分享面板。
+    private func exportLocalPlaylists() {
+        guard !store.playlists.isEmpty else {
+            ToastCenter.shared.show("还没有本地歌单可以备份")
+            return
+        }
+        guard let data = WebDAVSyncStore.encodeSnapshot(store.playlists) else {
+            ToastCenter.shared.show("歌单备份生成失败")
+            return
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let name = "Beans-LocalPlaylists-\(formatter.string(from: Date())).json"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            ToastCenter.shared.show("歌单备份写入失败")
+            return
+        }
+        localBackupURL = url
+        localRestoreMessage = ""
+        showLocalBackupShare = true
+    }
+
+    /// 从文件恢复本机歌单。解析格式与 WebDAV 导入完全一致，
+    /// 同名歌曲沿用 WebDAV 里设置的「跳过 / 替换」策略，不会盲目翻倍。
+    private func handleLocalRestore(from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url),
+              let imported = WebDAVSyncStore.parseImport(data) else {
+            localRestoreMessage = ""
+            ToastCenter.shared.show("没有从这个文件里读到歌单")
+            return
+        }
+        let result = store.merge(imported, duplicatePolicy: WebDAVSyncStore.shared.duplicatePolicy)
+        if result.playlists == 0, result.songs == 0 {
+            localRestoreMessage = "文件里的歌单都已经在本机了，没有需要新增或替换的内容"
+            ToastCenter.shared.show("本机歌单已是最新")
+        } else {
+            BeansHaptics.success()
+            localRestoreMessage = "已恢复 \(result.playlists) 个歌单、\(result.songs) 首歌曲"
+            ToastCenter.shared.show("已恢复 \(result.playlists) 个歌单、\(result.songs) 首歌曲")
+        }
+    }
+
+    /// 分享面板关掉后删掉临时文件，别在沙盒里攒垃圾。
+    private func cleanupLocalBackupFile() {
+        guard let url = localBackupURL else { return }
+        try? FileManager.default.removeItem(at: url)
+        localBackupURL = nil
     }
 
     private func sync(targets: Set<SyncTarget>) async {

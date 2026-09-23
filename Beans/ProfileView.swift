@@ -15,16 +15,19 @@ struct ProfileView: View {
     @EnvironmentObject private var player: PlayerManager
     /// 插件音源数量展示（MusicFree 插件，与「自定义音源」并列）
     @ObservedObject private var pluginManager = MFPluginManager.shared
+    /// 本地歌单数量要实时反映在入口卡片上。
+    @ObservedObject private var localLibrary = LocalLibraryStore.shared
     @AppStorage("beans.themeMode") private var themeModeRaw = BeansThemeMode.system.rawValue
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     @AppStorage("beans.homeHeaderHideSort") private var homeHeaderHideSort = false
     @AppStorage("beans.pauseHomeRendering") private var homeRenderingPaused = false
 
     @State private var showHistory = false
+    /// 本地歌单入口。原先只有「音乐库」里能找到，网易云歌单一长就得滚很久，这里单开一个入口。
+    @State private var showLocalPlaylists = false
 
     /// 统一账号登录面板（网易云 + QQ 音乐整合）
-    @State private var showAccountHub = false
-    /// 设置页（外观 + 歌词翻译等）
+    @State private var showAccountHub = false    /// 设置页（外观 + 歌词翻译等）
     @State private var showSettings = false
     @State private var showSectionSort = false
     /// 我的界面板块顺序（账号 / 关于，可自定义）
@@ -183,6 +186,8 @@ struct ProfileView: View {
                         switch key {
                         case "账号":
                             userCard
+                        case "本地歌单":
+                            localPlaylistCard
                         case "关于":
                             EmptyView()
                         default:
@@ -220,6 +225,9 @@ struct ProfileView: View {
             Button("知道了", role: .cancel) {}
         } message: {
             Text("请使用微信扫描上方二维码完成赞助。")
+        }
+        .sheet(isPresented: $showLocalPlaylists) {
+            localPlaylistsSheet
         }
         .sheet(isPresented: $showHistory) {
             HistoryView()
@@ -396,6 +404,92 @@ struct ProfileView: View {
                         BeansGlass(shape: RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
         .beansCardShadow(radius: 10, y: 4)
+    }
+
+    /// 「本地歌单」板块入口。
+    /// 本地歌单原先只长在「音乐库」里，而那一页排在前面的是云端歌单 ——
+    /// 网易云歌单一长，想找本机歌单得先滚过整张列表。这里给一个独立入口，
+    /// 点进去就是本地歌单页（一键同步、备份、恢复都在那儿）。
+    private var localPlaylistCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "本地歌单")
+            Button {
+                BeansHaptics.tap()
+                showLocalPlaylists = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "music.note.list")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.beansAmber)
+                        .frame(width: 34, height: 34)
+                        .background(Color.beansGlassFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(isEnglish ? "On-Device Playlists" : "本机歌单")
+                            .font(BeansFont.appFont(14, .semibold))
+                            .foregroundStyle(Color.beansLabel)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.82)
+                        Text(localPlaylistSummary)
+                            .font(BeansFont.appFont(11))
+                            .foregroundStyle(Color.beansComment)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.78)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.beansComment.opacity(0.6))
+                }
+                .padding(12)
+                .background {
+                    BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(GlassPressButtonStyle(scale: 0.97))
+        }
+    }
+
+    private var localPlaylistSummary: String {
+        if localLibrary.playlists.isEmpty {
+            return isEnglish ? "No on-device playlists yet — tap to create one" : "还没有本地歌单，点进来新建一个"
+        }
+        let songCount = localLibrary.playlists.reduce(0) { $0 + $1.songs.count }
+        if isEnglish {
+            return "\(localLibrary.playlists.count) playlists · \(songCount) songs · sync, back up and restore here"
+        }
+        return "\(localLibrary.playlists.count) 个歌单 · \(songCount) 首歌曲 · 可同步、备份与恢复"
+    }
+
+    /// 本地歌单页。整页直接复用音乐库里的那个区块，
+    /// 于是「一键同步歌单 / 备份 / 恢复」和歌单列表都在同一屏，不用再往下钻。
+    private var localPlaylistsSheet: some View {
+        BeansNavigationStack {
+            ZStack {
+                GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
+                ScrollView {
+                    LocalMusicSection()
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                        .padding(.bottom, 40)
+                        .frame(maxWidth: 860)
+                        .frame(maxWidth: .infinity)
+                }
+                .beansScrollIndicatorsHidden()
+            }
+            .navigationTitle("本地歌单")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { showLocalPlaylists = false }
+                }
+            }
+        }
+        .environmentObject(player)
+        .environmentObject(auth)
+        .environmentObject(theme)
+        .environmentObject(FavoritesStore.shared)
     }
 
     /// 每个登录平台单独展示登录成功状态（网易云 / QQ 音乐）

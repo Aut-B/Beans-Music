@@ -145,6 +145,12 @@ final class PlayerManager: NSObject, ObservableObject {
     private let defaults = UserDefaults.standard
     private var didAttemptAutoResume = false
 
+    /// 连续「因解析失败而自动跳过」的次数。
+    /// 整条队列都放不出来时（比如订阅过期、音源全挂），没有上限就会一首接一首无限跳，
+    /// 用户看到的是歌名疯狂闪烁却始终没声音 —— 到上限就停住并提示，比空转有用。
+    private var consecutiveAutoSkipCount = 0
+    private static let maxConsecutiveAutoSkip = 8
+
     /// 是否存在可用的第三方解析能力：内置的 pyncmd，或任一启用中的自定义音源。
     ///
     /// 注意别只判「导入的音源」—— pyncmd 是 App 自带的，
@@ -253,6 +259,12 @@ final class PlayerManager: NSObject, ObservableObject {
 
     func togglePlayPause() {
         guard ensurePlaybackAllowed() else { return }
+        // 上一次解析彻底失败时播放器已经被丢弃，此时「播放键」的语义是重新解析这首，
+        // 而不是去操作一段已经作废的流。
+        if loadFailed {
+            loadCurrent(resumeAt: progress)
+            return
+        }
         guard let player else {
             guard currentSong != nil else { return }
             loadCurrent(resumeAt: progress)
@@ -272,6 +284,8 @@ final class PlayerManager: NSObject, ObservableObject {
     func next(manual: Bool = true) {
         guard ensurePlaybackAllowed() else { return }
         guard !queue.isEmpty else { return }
+        // 用户自己点「下一首」说明换歌是主动动作，连续失败计数从此重新算。
+        if manual { consecutiveAutoSkipCount = 0 }
         if playMode == .repeatOne && manual {
             restartCurrent()
             return
@@ -533,28 +547,40 @@ final class PlayerManager: NSObject, ObservableObject {
                 let pluginQuality = thirdPartyQuality.mfPluginQuality
                 var resolvedMedia: MFPluginMediaSource?
                 var pyncmdBitrate = 0
+                // 顺位里匹配到的网易云 id。pyncmd 没给出直链时，
+                // 后面那一档第三方音源可以直接复用它，不必再把歌名搜一遍。
+                var matchedNeteaseID: Int?
                 // 这首歌的 pyncmd 直链之前已经证明打不开，本次直接问插件自己。
                 let pyncmdBlocked = await MainActor.run {
                     self.pyncmdBlockedSongs.contains(song.identityKey)
                 }
                 if preferred.enabled, preferred.preferForPlugin, !pyncmdBlocked,
-                   let matched = await matchNetEaseSong(
+                   let matched = await self.matchNetEaseSong(
                        name: song.name,
                        artists: song.artists,
                        durationMS: Int(max(0, song.duration) * 1000),
                        strict: true
-                   ),
-                   let hit = await PyncmdSource.mediaURL(neteaseID: matched.id, quality: preferred.quality) {
-                    BeansLogger.shared.log(
-                        "插件歌曲改用首选音源（pyncmd）：\(song.name) → 网易云 id=\(matched.id) 码率=\(hit.bitrate)kbps",
-                        level: .info
-                    )
-                    pyncmdBitrate = hit.bitrate
-                    resolvedMedia = MFPluginMediaSource(url: hit.url, headers: nil)
-                    // 记下来：这条地址是 pyncmd 给的。AVPlayer 打不开时据此退回插件自身解析，
-                    // 而不是直接判播放失败。
-                    let servedSongKey = song.identityKey
-                    await MainActor.run { self.pyncmdSuppliedSongKey = servedSongKey }
+                   ) {
+                    matchedNeteaseID = matched.id
+                    if let hit = await PyncmdSource.mediaURL(neteaseID: matched.id, quality: preferred.quality) {
+                        BeansLogger.shared.log(
+                            "插件歌曲改用首选音源（pyncmd）：\(song.name) → 网易云 id=\(matched.id) 码率=\(hit.bitrate)kbps",
+                            level: .info
+                        )
+                        pyncmdBitrate = hit.bitrate
+                        resolvedMedia = MFPluginMediaSource(url: hit.url, headers: nil)
+                        // 记下来：这条地址是 pyncmd 给的。AVPlayer 打不开时据此退回插件自身解析，
+                        // 而不是直接判播放失败。
+                        let servedSongKey = song.identityKey
+                        await MainActor.run { self.pyncmdSuppliedSongKey = servedSongKey }
+                    } else {
+                        // 匹配到了网易云条目，但首选音源没给地址（服务不可用 / 该曲没有版权）。
+                        // 关键：不能就此停下 —— 下面还有插件自身和第三方音源两档。
+                        BeansLogger.shared.log(
+                            "首选音源（pyncmd）未给出直链，继续向下顺位：\(song.name)｜网易云 id=\(matched.id)",
+                            level: .info
+                        )
+                    }
                 }
                 if resolvedMedia?.url == nil,
                    let platform = song.pluginPlatform,
@@ -576,6 +602,42 @@ final class PlayerManager: NSObject, ObservableObject {
                         item: item,
                         quality: pluginQuality
                     )
+                }
+                // 最后一档：通用第三方音源。
+                // 插件自己的解析出口偶尔会抽（源站限流、条目下架），这时不要直接判死 ——
+                // 拿顺位里匹配到的网易云 id（没有就用歌名+歌手）去用户导入的第三方音源再要一次地址。
+                // 能出声总比跳歌强，这也正是设置页「顺位」文案承诺的那一档。
+                if resolvedMedia?.url == nil, enableUnblock {
+                    let thirdParty = await UnblockService.resolve(
+                        name: song.name,
+                        artists: song.artists,
+                        neteaseID: matchedNeteaseID ?? 0,
+                        songSource: .netease,
+                        quality: thirdPartyQuality,
+                        strict: true,
+                        // pyncmd 这一档上面已经试过（或被用户关掉、或这首歌已被标记跳过），
+                        // 传 true 免得对同一个地址再打一次注定失败的请求。
+                        skipPreferredSource: true
+                    )
+                    if let thirdParty {
+                        let notice = self.thirdPartyVIPNotice(for: song, sourceTitle: thirdParty.sourceTitle)
+                        await MainActor.run {
+                            guard generation == self.loadGeneration else { return }
+                            self.setupPlayer(
+                                url: thirdParty.url,
+                                thirdPartyVIPNotice: notice,
+                                resumeAt: initialProgress,
+                                isThirdParty: true,
+                                thirdPartyQuality: thirdParty.quality
+                            )
+                        }
+                        BeansLogger.shared.log(
+                            "插件歌曲经第三方音源兜底成功：\(song.name)｜域名=\(thirdParty.url.host ?? "?")",
+                            level: .info
+                        )
+                        return
+                    }
+                    BeansLogger.shared.log("插件歌曲第三方音源兜底未命中：\(song.name)", level: .debug)
                 }
                 if let mediaURL = resolvedMedia?.url {
                     let headers = resolvedMedia?.headers
@@ -892,10 +954,9 @@ final class PlayerManager: NSObject, ObservableObject {
     private func retryThirdPartyIfNeeded(excludingHost: String? = nil) -> Bool {
         guard let song = currentSong,
               externalSourcesEnabled else { return false }
-        // 插件音源的歌不走第三方解锁链路 —— `resolveThirdParty` 对 `.plugin` 直接返回 nil。
-        // 不早退的话这里会「假装重试成功」（返回 true 吞掉这次失败），再沿音质降级链空转几轮，
-        // 最后才报失败；而正确的动作是交给 retryPyncmdPluginFallbackIfNeeded 退回插件自身解析。
-        guard song.source != .plugin else { return false }
+        // 插件音源同样允许走第三方解锁链路（`resolveThirdParty` 的 `.plugin` 分支按歌名搜）。
+        // 原先这里直接早退，导致插件歌曲一旦退到第三方地址、而该地址又失效时，
+        // 会「假装重试成功」吞掉失败、沿音质降级链空转几轮，最后才报错。
         if playbackRecoveryInFlightSongKey == song.identityKey {
             return true
         }
@@ -1242,6 +1303,8 @@ final class PlayerManager: NSObject, ObservableObject {
                           item.status == .readyToPlay,
                           !self.playbackConfirmed else { return }
                     self.playbackConfirmed = true
+                    // 真的出声音了，说明这条解析链是通的，连续失败计数清零。
+                    self.consecutiveAutoSkipCount = 0
                     if let song = self.currentSong {
                         BeansLogger.shared.log(
                             "▶ 播放成功确认：\(song.name)｜URL=\(self.playbackURLSummary(url))｜第三方=\(isThirdParty ? "是" : "否")｜itemStatus=\(self.playerItemStatusDescription(item.status))",
@@ -1349,12 +1412,19 @@ final class PlayerManager: NSObject, ObservableObject {
             return
         }
         finalizedFailureSongKey = failedSong.identityKey
-        let shouldAutoSkip = defaults.object(forKey: autoSkipOnFailureKey) as? Bool ?? true
+        // 确认是「当前这一首」彻底解析不出来，才把播放器丢掉。
+        //
+        // 不清的后果很具体：AVPlayer 实例还停在上一首的 item 上，用户点播放键时
+        // `togglePlayPause` 会因为 player 非空而直接对旧 item 调 playImmediately，
+        // 表现出来就是「这首放不了，一点播放却退回上一首」。
+        discardFailedPlayer()
+        let autoSkipEnabled = defaults.object(forKey: autoSkipOnFailureKey) as? Bool ?? true
+        let shouldAutoSkip = autoSkipEnabled && consecutiveAutoSkipCount < Self.maxConsecutiveAutoSkip
         let failureMessage: String
         if shouldAutoSkip && queue.count > 1 {
             failureMessage = beansLocalized(
-                "播放失败，10秒后自动切换到下一首",
-                "Playback failed. The next song will start in 10 seconds."
+                "播放失败，3 秒后自动切换到下一首",
+                "Playback failed. The next song will start in 3 seconds."
             )
         } else {
             failureMessage = message ?? beansLocalized(
@@ -1366,7 +1436,11 @@ final class PlayerManager: NSObject, ObservableObject {
             ToastCenter.shared.show(failureMessage, duration: 3)
         }
         guard shouldAutoSkip, queue.count > 1 else { return }
-        BeansLogger.shared.log("播放失败自动下一首：\(failedSong.name)｜原因=\(reason)", level: .info)
+        consecutiveAutoSkipCount += 1
+        BeansLogger.shared.log(
+            "播放失败自动下一首：\(failedSong.name)｜原因=\(reason)｜连续第 \(consecutiveAutoSkipCount) 首",
+            level: .info
+        )
         let failedSongKey = failedSong.identityKey
         let failedGeneration = loadGeneration
         let workItem = DispatchWorkItem { [weak self] in
@@ -1381,7 +1455,18 @@ final class PlayerManager: NSObject, ObservableObject {
         }
         failureAutoSkipWorkItem?.cancel()
         failureAutoSkipWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: workItem)
+        // 原先的 10 秒太长：一首放不出来要干等十秒才换下一首，期间用户只能反复点播放键，
+        // 体感就是「卡死了」。3 秒足够看清失败提示，又不会让人空等。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: workItem)
+    }
+
+    /// 解析彻底失败后释放播放器及其观察者。
+    /// 置空之后 `togglePlayPause` 会走 `loadCurrent` 重新解析当前曲目，
+    /// 「播放键」的语义才回到「重试这一首」。
+    private func discardFailedPlayer() {
+        player?.pause()
+        removeCurrentObservers()
+        player = nil
     }
 
     private func ensurePlaybackAllowed() -> Bool {
@@ -1428,8 +1513,17 @@ final class PlayerManager: NSObject, ObservableObject {
                 excludedHosts: excludedHosts
             )
         case .plugin:
-            // 插件音源不走第三方解锁链路，播放地址由 MFPluginManager 直接解析
-            return nil
+            // 插件条目（短视频音源等）在插件自身给不出地址时，按歌名去第三方音源再试一次。
+            // 歌手字段是 UP 主 / 上传者名，拿去和网易云对不上，所以传空串不做歌手过滤。
+            return await UnblockService.resolve(
+                name: song.name,
+                artists: "",
+                neteaseID: 0,
+                songSource: .netease,
+                quality: quality,
+                strict: strict,
+                excludedHosts: excludedHosts
+            )
         }
     }
 
