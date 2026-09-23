@@ -259,8 +259,20 @@ final class PlayerManager: NSObject, ObservableObject {
 
     func togglePlayPause() {
         guard ensurePlaybackAllowed() else { return }
-        // 上一次解析彻底失败时播放器已经被丢弃，此时「播放键」的语义是重新解析这首，
-        // 而不是去操作一段已经作废的流。
+        // 地址解析进行中（`loadCurrent` 一进来就把旧播放器作废了，所以此时 player 必为 nil）。
+        // 这里不能再去 `loadCurrent` —— 那会让等待重新计时，用户每按一下反而更慢。
+        // 给一条明确反馈，让他知道系统正在找音源。
+        if isBuffering, player == nil {
+            Task { @MainActor in
+                ToastCenter.shared.show(
+                    beansLocalized("正在寻找可用音源…", "Looking for a playable source…"),
+                    duration: 1.6
+                )
+            }
+            return
+        }
+        // 上一次解析彻底失败时播放器已经被丢弃，此时「播放键」的语义是重新解析这首
+        // （重走一遍顺位，包含自定义音源），而不是去操作一段已经作废的流。
         if loadFailed {
             loadCurrent(resumeAt: progress)
             return
@@ -516,8 +528,16 @@ final class PlayerManager: NSObject, ObservableObject {
         playbackStallWorkItem = nil
         qqThirdPartyFallbackSongKey = nil
         let initialProgress = max(0, min(resumeAt ?? 0, max(song.duration, 0)))
-        // 切歌立即暂停旧音频，避免新歌加载期间旧歌继续播放造成“切歌卡住”感
-        player?.pause()
+        // 切歌立即「作废」旧播放器，而不是只 pause。
+        //
+        // 只 pause 的后果很具体：AVPlayer 实例仍停在上一首的 item 上，而地址解析是异步的
+        // （顺位几档串下来可能十几秒）。这段时间里用户按播放键，`togglePlayPause` 的
+        // `guard let player` 会命中这个旧实例，直接对上一首的 item 调 `playImmediately` ——
+        // 表现就是「新歌半天不出声，一点播放却退回上一首」。
+        //
+        // 置空之后，同一次按键会落到下面的 `loadCurrent` 分支，语义回到用户期望的
+        // 「重试当前这一首（重走一遍顺位）」。
+        discardPlayer()
         duration = song.duration
         progress = initialProgress
         isPlaying = false
@@ -554,54 +574,54 @@ final class PlayerManager: NSObject, ObservableObject {
                 let pyncmdBlocked = await MainActor.run {
                     self.pyncmdBlockedSongs.contains(song.identityKey)
                 }
-                if preferred.enabled, preferred.preferForPlugin, !pyncmdBlocked,
-                   let matched = await self.matchNetEaseSong(
-                       name: song.name,
-                       artists: song.artists,
-                       durationMS: Int(max(0, song.duration) * 1000),
-                       strict: true
-                   ) {
-                    matchedNeteaseID = matched.id
-                    if let hit = await PyncmdSource.mediaURL(neteaseID: matched.id, quality: preferred.quality) {
-                        BeansLogger.shared.log(
-                            "插件歌曲改用首选音源（pyncmd）：\(song.name) → 网易云 id=\(matched.id) 码率=\(hit.bitrate)kbps",
-                            level: .info
-                        )
-                        pyncmdBitrate = hit.bitrate
-                        resolvedMedia = MFPluginMediaSource(url: hit.url, headers: nil)
-                        // 记下来：这条地址是 pyncmd 给的。AVPlayer 打不开时据此退回插件自身解析，
-                        // 而不是直接判播放失败。
-                        let servedSongKey = song.identityKey
-                        await MainActor.run { self.pyncmdSuppliedSongKey = servedSongKey }
-                    } else {
-                        // 匹配到了网易云条目，但首选音源没给地址（服务不可用 / 该曲没有版权）。
-                        // 关键：不能就此停下 —— 下面还有插件自身和第三方音源两档。
-                        BeansLogger.shared.log(
-                            "首选音源（pyncmd）未给出直链，继续向下顺位：\(song.name)｜网易云 id=\(matched.id)",
-                            level: .info
-                        )
+                // 「首选音源（pyncmd）」与「插件自身」两条候选**同时**发起，谁先给出
+                // 可用地址就用谁。
+                //
+                // 这两档原先是串行的：先匹配网易云再换直链，拿不到才回头问插件自己。
+                // 而两档各自都要走网络（搜索接口超时 20 秒、插件解析 10–12 秒），
+                // 串起来最坏是两者**相加** —— 用户按了下一首，屏幕上就是长时间没声。
+                // 并发后最坏只等于较慢的那一条；pyncmd 正常时一秒内就返回，
+                // 高音质这条路径依旧照常胜出，音质不打折。
+                let canTryPreferred = preferred.enabled && preferred.preferForPlugin && !pyncmdBlocked
+                let canTryPlugin = song.pluginPlatform != nil
+                    && song.pluginItemID != nil
+                    && song.pluginRawJSON != nil
+                if canTryPreferred || canTryPlugin {
+                    await withTaskGroup(of: PluginSourceAttempt.self) { group in
+                        if canTryPreferred {
+                            group.addTask {
+                                await Self.preferredSourceAttempt(
+                                    song: song,
+                                    pyncmdQuality: preferred.quality
+                                )
+                            }
+                        }
+                        if canTryPlugin {
+                            group.addTask {
+                                await Self.pluginSelfAttempt(song: song, pluginQuality: pluginQuality)
+                            }
+                        }
+                        // 匹配到的网易云 id 要留着：两档都没出声时，最后一档第三方音源
+                        // 可以直接拿它去换地址，不必再把歌名搜一遍。
+                        var matchedIDSeen: Int?
+                        for await attempt in group {
+                            if let id = attempt.matchedNeteaseID { matchedIDSeen = id }
+                            if attempt.media?.url != nil {
+                                resolvedMedia = attempt.media
+                                pyncmdBitrate = attempt.bitrate
+                                matchedNeteaseID = attempt.matchedNeteaseID ?? matchedIDSeen
+                                group.cancelAll()
+                                break
+                            }
+                        }
+                        if matchedNeteaseID == nil { matchedNeteaseID = matchedIDSeen }
                     }
                 }
-                if resolvedMedia?.url == nil,
-                   let platform = song.pluginPlatform,
-                   let itemID = song.pluginItemID,
-                   let rawJSON = song.pluginRawJSON {
-                    let item = MFPluginMusicItem(
-                        id: "\(platform)|\(itemID)",
-                        platform: platform,
-                        itemID: itemID,
-                        title: song.name,
-                        artist: song.artists,
-                        album: song.album,
-                        artwork: song.coverURL?.absoluteString,
-                        durationMS: Int(max(0, song.duration) * 1000),
-                        rawJSON: rawJSON
-                    )
-                    resolvedMedia = await MFPluginManager.shared.getMediaSource(
-                        platform: platform,
-                        item: item,
-                        quality: pluginQuality
-                    )
+                if pyncmdBitrate > 0 {
+                    // 记下来：这条地址是 pyncmd 给的。AVPlayer 打不开时据此退回插件自身解析，
+                    // 而不是直接判播放失败。
+                    let servedSongKey = song.identityKey
+                    await MainActor.run { self.pyncmdSuppliedSongKey = servedSongKey }
                 }
                 // 最后一档：通用第三方音源。
                 // 插件自己的解析出口偶尔会抽（源站限流、条目下架），这时不要直接判死 ——
@@ -779,12 +799,12 @@ final class PlayerManager: NSObject, ObservableObject {
                 return (nil, hit)
             }
         }
-        let infos = try? await NetEaseAPI.shared.songURLInfo(ids: [song.id], level: quality.level)
-        var info = infos?[song.id]
+        // 官方取址套一层硬预算：`NetEaseAPI` 的会话超时是 20 秒，而灰色 / VIP 歌曲
+        // 在服务端本来就拿不到完整地址 —— 不该让整条顺位链在这一档上干等十几秒。
+        var info = await Self.netEaseOfficialURL(id: song.id, level: quality.level, timeout: 8)
         if (info?.url == nil || info?.freeTrial == true), quality != .standard {
             // 高音质拿不到时自动回落到标准音质
-            let fallback = try? await NetEaseAPI.shared.songURLInfo(ids: [song.id], level: "standard")
-            info = fallback?[song.id]
+            info = await Self.netEaseOfficialURL(id: song.id, level: "standard", timeout: 8)
         }
         BeansLogger.shared.log("网易云解析：\(song.name) 音质=\(quality.level) 官方URL=\(info?.url == nil ? "无" : "有") 试听=\(info?.freeTrial == true ? "是" : "否")", level: .debug)
         // 试听片段 / 无 URL 一律不直接播放，交给第三方解锁，避免"只能试听"
@@ -862,7 +882,7 @@ final class PlayerManager: NSObject, ObservableObject {
         }
 
         let strict = shouldLockOfficialOnly(song)
-        if let matched = await matchNetEaseSong(
+        if let matched = await Self.matchNetEaseSong(
             name: song.name,
             artists: song.artists,
             durationMS: Int(song.duration * 1000),
@@ -889,8 +909,136 @@ final class PlayerManager: NSObject, ObservableObject {
         false
     }
 
-    /// 在网易云按 歌名+歌手 匹配同名歌曲（QQ vkey 失败时的免费播放兜底）
-    private func matchNetEaseSong(name: String, artists: String, durationMS: Int, strict: Bool = false) async -> Song? {
+    // MARK: - 插件歌曲顺位候选
+    //
+    // 「首选音源（pyncmd）」与「插件自身」是两条彼此独立的取址路径，
+    // `loadCurrent` 用 TaskGroup 让它们同时跑（串行会退化成两者耗时相加）。
+    // 下面两个 attempt 方法刻意写成 static：它们不碰实例状态，
+    // 放进子任务里不需要捕获 self。
+
+    /// 一次取址尝试的结果。两档都能表达「没成，但顺手拿到了网易云 id」。
+    private struct PluginSourceAttempt: Sendable {
+        var media: MFPluginMediaSource?
+        var bitrate: Int = 0
+        var matchedNeteaseID: Int?
+    }
+
+    /// 候选一：按歌名+歌手匹配网易云曲目，再用 pyncmd 换高音质直链。
+    ///
+    /// 匹配用 strict 模式：必须歌名对得上、歌手也命中、时长差 12 秒以内。
+    /// 非 strict 的「只按时长接近」那条退化分支在这里很危险 ——
+    /// 哔哩哔哩条目的歌手是 UP 主名，只按时长硬匹配很容易把一段视频
+    /// 换成一首毫不相干的网易云歌曲。
+    private static func preferredSourceAttempt(
+        song: Song,
+        pyncmdQuality: PyncmdQuality
+    ) async -> PluginSourceAttempt {
+        guard let matched = await matchNetEaseSong(
+            name: song.name,
+            artists: song.artists,
+            durationMS: Int(max(0, song.duration) * 1000),
+            strict: true
+        ) else {
+            return PluginSourceAttempt()
+        }
+        guard let hit = await PyncmdSource.mediaURL(neteaseID: matched.id, quality: pyncmdQuality) else {
+            // 匹配到了网易云条目，但首选音源没给地址（服务不可用 / 该曲没有版权）。
+            // 把 id 带回去：最后一档第三方音源可以直接拿它换地址，不必再搜一遍。
+            BeansLogger.shared.log(
+                "首选音源（pyncmd）未给出直链，继续向下顺位：\(song.name)｜网易云 id=\(matched.id)",
+                level: .info
+            )
+            return PluginSourceAttempt(matchedNeteaseID: matched.id)
+        }
+        BeansLogger.shared.log(
+            "插件歌曲改用首选音源（pyncmd）：\(song.name) → 网易云 id=\(matched.id) 码率=\(hit.bitrate)kbps",
+            level: .info
+        )
+        return PluginSourceAttempt(
+            media: MFPluginMediaSource(url: hit.url, headers: nil),
+            bitrate: hit.bitrate,
+            matchedNeteaseID: matched.id
+        )
+    }
+
+    /// 候选二：交给插件自身的解析出口（B 站走原生解析，其余平台跑插件 JS）。
+    private static func pluginSelfAttempt(song: Song, pluginQuality: String) async -> PluginSourceAttempt {
+        guard let platform = song.pluginPlatform,
+              let itemID = song.pluginItemID,
+              let rawJSON = song.pluginRawJSON else {
+            return PluginSourceAttempt()
+        }
+        let item = MFPluginMusicItem(
+            id: "\(platform)|\(itemID)",
+            platform: platform,
+            itemID: itemID,
+            title: song.name,
+            artist: song.artists,
+            album: song.album,
+            artwork: song.coverURL?.absoluteString,
+            durationMS: Int(max(0, song.duration) * 1000),
+            rawJSON: rawJSON
+        )
+        let media = await MFPluginManager.shared.getMediaSource(
+            platform: platform,
+            item: item,
+            quality: pluginQuality
+        )
+        return PluginSourceAttempt(media: media)
+    }
+
+    /// 网易云官方取址，带**硬性时间预算**。
+    ///
+    /// `NetEaseAPI` 的会话超时是 20 秒，对顺位链上的单档来说太长：
+    /// 灰色 / VIP 歌曲在服务端本来就返回空地址，这一档慢下来只会拖住后面几档。
+    private static func netEaseOfficialURL(
+        id: Int,
+        level: String,
+        timeout: TimeInterval
+    ) async -> NetEaseAPI.SongURLInfo? {
+        await withTaskGroup(of: NetEaseAPI.SongURLInfo?.self) { group in
+            group.addTask {
+                let infos = try? await NetEaseAPI.shared.songURLInfo(ids: [id], level: level)
+                return infos?[id]
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0.2, timeout) * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// 在网易云按 歌名+歌手 匹配同名歌曲（QQ/酷狗 vkey 失败时的免费播放兜底）。
+    ///
+    /// 带**硬性时间预算**：`NetEaseAPI` 的会话超时是 20 秒，而这一档处在
+    /// 顺位链的最前面 —— 它一旦抽风，后面几档全得排队。超时按「没匹配上」
+    /// 处理，直接让位给插件自身那条路径。
+    private static func matchNetEaseSong(
+        name: String,
+        artists: String,
+        durationMS: Int,
+        strict: Bool = false,
+        timeout: TimeInterval = 4
+    ) async -> Song? {
+        await withTaskGroup(of: Song?.self) { group in
+            group.addTask {
+                await searchNeteaseMatch(name: name, artists: artists, durationMS: durationMS, strict: strict)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0.2, timeout) * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// `matchNetEaseSong` 的实际匹配逻辑（不含超时包装）。
+    private static func searchNeteaseMatch(name: String, artists: String, durationMS: Int, strict: Bool) async -> Song? {
         let keyword = ([name, artists].filter { !$0.isEmpty }).joined(separator: " ")
         guard !keyword.isEmpty,
               let results = try? await NetEaseAPI.shared.search(keyword: keyword, limit: 8),
@@ -1417,7 +1565,7 @@ final class PlayerManager: NSObject, ObservableObject {
         // 不清的后果很具体：AVPlayer 实例还停在上一首的 item 上，用户点播放键时
         // `togglePlayPause` 会因为 player 非空而直接对旧 item 调 playImmediately，
         // 表现出来就是「这首放不了，一点播放却退回上一首」。
-        discardFailedPlayer()
+        discardPlayer()
         let autoSkipEnabled = defaults.object(forKey: autoSkipOnFailureKey) as? Bool ?? true
         let shouldAutoSkip = autoSkipEnabled && consecutiveAutoSkipCount < Self.maxConsecutiveAutoSkip
         let failureMessage: String
@@ -1460,10 +1608,14 @@ final class PlayerManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: workItem)
     }
 
-    /// 解析彻底失败后释放播放器及其观察者。
-    /// 置空之后 `togglePlayPause` 会走 `loadCurrent` 重新解析当前曲目，
-    /// 「播放键」的语义才回到「重试这一首」。
-    private func discardFailedPlayer() {
+    /// 作废当前播放器实例及其观察者。
+    ///
+    /// 两个调用场景：
+    /// 1. `loadCurrent` 一进来就调用 —— 切歌瞬间旧 player 必须失效，否则解析期间
+    ///    用户按播放键会命中旧实例、操作到上一首的音频。
+    /// 2. `finishUnrecoverablePlaybackFailure` —— 这首彻底解析不出来，释放之后
+    ///    `togglePlayPause` 才会走「重新解析当前曲」，即用户期望的「重试这一首」。
+    private func discardPlayer() {
         player?.pause()
         removeCurrentObservers()
         player = nil

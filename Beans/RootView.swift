@@ -153,7 +153,9 @@ struct RootView: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.86), value: player.currentSong?.id)
-        .animation(.easeInOut(duration: 0.22), value: selection)
+        // 这里原先还有一条 `.animation(..., value: selection)`：它给每次 Tab 切换
+        // 加 0.22 秒隐式动画，而切换那一帧正是新页面首次构建的峰值 —— 动画叠在上面
+        // 就是「滑一下底栏就发涩」。Tab 切换保持即时，过渡交给各页面自己处理。
         .overlay(alignment: .bottom) {
             ToastView(center: ToastCenter.shared)
         }
@@ -315,9 +317,10 @@ struct RootView: View {
             ) { tab in
                 guard selection != tab else { return }
                 BeansHaptics.select()
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
-                    selection = tab
-                }
+                // 切页不加显式动画：`TabView` 的切换本身是即时的，套一层 spring 只会让
+                // 新页面里所有可动画属性（列表行、卡片、渐变）跟着重跑一遍过渡。
+                // 而切换那一帧正是新页面首次构建的峰值，动画压在上面就是肉眼可见的掉帧。
+                selection = tab
             }
             .frame(width: legacyTabResolvedWidth)
         }
@@ -634,21 +637,21 @@ private struct KumoneGlassTabBar: View {
             .onChanged { value in
                 if !isDragging && abs(value.translation.width) < 8 { return }
                 isDragging = true
+                // 拖动过程中**只移动指示胶囊**，不真正切换页面。
+                //
+                // 原先这里是「滑过哪个格子就切到哪个 tab」：手指从「主页」划到「我的」，
+                // 中途会依次触发三次 selection 变更 —— 等于**连续构建三个 Tab 页**，
+                // 每次都还套一层 spring 动画。这正是「在底栏上滑一下很卡」的来源。
+                // 现在拖动只做跟手位移，松手才切一次。
                 dragX = value.location.x
-                let tab = items[index(for: value.location.x, cellW: cellW, count: count)].tab
-                if tab != selection {
-                    selection = tab
-                    onSelect(tab)
-                }
             }
             .onEnded { value in
                 let tab = items[index(for: value.location.x, cellW: cellW, count: count)].tab
-                withAnimation(settle) {
-                    selection = tab
-                    onSelect(tab)
-                    dragX = nil
-                }
+                // 指示胶囊弹回格子中心；页面切换本身交给 onSelect（一次）。
+                withAnimation(settle) { dragX = nil }
                 isDragging = false
+                guard tab != selection else { return }
+                onSelect(tab)
             }
     }
 }
