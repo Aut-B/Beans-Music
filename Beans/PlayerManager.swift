@@ -151,6 +151,9 @@ final class PlayerManager: NSObject, ObservableObject {
     private var consecutiveAutoSkipCount = 0
     private static let maxConsecutiveAutoSkip = 8
 
+    /// 本轮播放是否已经预取过下一首的直链（每首歌只做一次）。
+    private var didPrefetchNextAddress = false
+
     /// 是否存在可用的第三方解析能力：内置的 pyncmd，或任一启用中的自定义音源。
     ///
     /// 注意别只判「导入的音源」—— pyncmd 是 App 自带的，
@@ -527,6 +530,8 @@ final class PlayerManager: NSObject, ObservableObject {
         playbackStallWorkItem?.cancel()
         playbackStallWorkItem = nil
         qqThirdPartyFallbackSongKey = nil
+        // 换歌了，下一首的预取标记跟着重置。
+        didPrefetchNextAddress = false
         let initialProgress = max(0, min(resumeAt ?? 0, max(song.duration, 0)))
         // 切歌立即「作废」旧播放器，而不是只 pause。
         //
@@ -775,8 +780,53 @@ final class PlayerManager: NSObject, ObservableObject {
         }
     }
 
-    /// 网易云播放地址解析：先试首选音源 pyncmd，再走官方接口，
-    /// VIP/灰色歌曲最后交给第三方解锁。
+    /// 预取下一首的播放地址。
+    ///
+    /// 「一首放完，下一首要等半天才出声」是用户最直接的抱怨，而等待几乎全花在网络取址上。
+    /// 网易云直链的有效期约 20 分钟、`PyncmdSource` 自带内存缓存，所以在**上一首还没放完时**
+    /// 就把下一首的直链取回来，自动切歌那一刻就是缓存命中，接近零等待。
+    ///
+    /// 只预热 pyncmd 这一档：
+    /// - 它是「网易云 id → 直链」的一次轻量 GET，命中率高、代价最低，也是音质最高的那一档；
+    /// - 官方接口要带登录 cookie、第三方可能是用户导入的脚本音源，重试代价高得多，
+    ///   在「用户未必会听下一首」的前提下不值得提前打。
+    private func prefetchNextAddress() {
+        guard queue.count > 1 else { return }
+        let nextIndex: Int
+        switch playMode {
+        case .shuffle:
+            guard playOrder.count > 1 else { return }
+            let nextPosition = orderPosition + 1
+            nextIndex = playOrder[nextPosition < playOrder.count ? nextPosition : 0]
+        default:
+            nextIndex = (currentIndex + 1) % queue.count
+        }
+        guard queue.indices.contains(nextIndex) else { return }
+        let next = queue[nextIndex]
+        guard next.source == .netease, next.id > 0 else { return }
+        let targetID = next.id
+        BeansLogger.shared.log("预热下一首直链：\(next.name)｜网易云 id=\(targetID)", level: .debug)
+        Task.detached(priority: .utility) {
+            let preferred = await PreferredSourceStore.currentSnapshot()
+            guard preferred.enabled, preferred.preferForNetease else { return }
+            // 结果不必回传：命中与否都不影响当前这一首，命中时已经进了 `PyncmdSource` 的内存缓存。
+            _ = await PyncmdSource.mediaURL(neteaseID: targetID, quality: preferred.quality)
+        }
+    }
+
+    /// 网易云歌曲的播放地址：各档**并发竞速**，谁先给出可用地址就用谁。
+    ///
+    /// 旧实现是串行的 —— pyncmd（超时 4 秒）→ 官方接口（8 秒）→ 官方降档（再 8 秒）
+    /// → 第三方音源（7 秒），最坏要 27 秒才轮到出声。用户反馈的
+    /// 「网易云歌单的歌按了下一首要等好久，本地歌单里的 B 站歌却很顺」
+    /// 正是这个差异造成的：插件音源那条分支在 1.13.0 已经改成并发，网易云这条主路径漏掉了。
+    ///
+    /// 现在的三档同时上路：
+    /// 1. pyncmd —— 按网易云 id 换直链，一次轻量 GET，通常 1 秒内返回，音质最高；
+    /// 2. 官方接口 —— 用户所选音质，拿不到再退标准音质（试听片段不算命中）；
+    /// 3. 用户导入的第三方音源 —— **延后 1.5 秒**才发起。前两档能命中时它会在
+    ///    等待阶段就被取消，不会白白打一轮网络；前两档都不行时它已经提前上路，
+    ///    不必让用户再从零等一遍。
     private func neteaseResolve(
         song: Song,
         quality: BeansAudioQuality,
@@ -784,47 +834,94 @@ final class PlayerManager: NSObject, ObservableObject {
         enableUnblock: Bool,
         strict: Bool = false
     ) async -> (String?, UnblockService.Resolved?) {
-        var urlString: String?
+        let preferred = await PreferredSourceStore.currentSnapshot()
+        let usePyncmd = enableUnblock && preferred.enabled && preferred.preferForNetease && song.id > 0
+        let started = Date()
+        var officialURL: String?
         var resolved: UnblockService.Resolved?
-        // 首选顺位：pyncmd 按网易云 id 直接换直链。它给的常常是 flac，
-        // 而官方接口按所选音质只给到 320k，所以放在官方之前。
-        var triedPreferredSource = false
-        if enableUnblock {
-            triedPreferredSource = true
-            if let hit = await UnblockService.preferredSourceResolve(
-                songSource: .netease,
-                neteaseID: song.id,
-                name: song.name
-            ) {
-                return (nil, hit)
+        var playedByPyncmd = false
+
+        await withTaskGroup(of: NeteaseAttempt.self) { group in
+            if usePyncmd {
+                // 第一档：pyncmd 按网易云 id 直接换直链。它给的常常是 flac，
+                // 而官方接口按所选音质多半只给到 320k —— 仍是音质最高的那一档。
+                group.addTask {
+                    guard let hit = await PyncmdSource.mediaURL(
+                        neteaseID: song.id,
+                        quality: preferred.quality
+                    ) else { return NeteaseAttempt() }
+                    return NeteaseAttempt(pyncmd: hit)
+                }
+            }
+            // 第二档：官方接口。两段串行只发生在这条子任务内部，
+            // 不影响其他档位 —— 这正是并发竞速的意义。
+            group.addTask {
+                if let info = await Self.netEaseOfficialURL(id: song.id, level: quality.level, timeout: 6),
+                   let url = info.url, info.freeTrial != true {
+                    return NeteaseAttempt(officialURL: url)
+                }
+                // 高音质拿不到时自动回落到标准音质
+                if quality != .standard,
+                   let info = await Self.netEaseOfficialURL(id: song.id, level: "standard", timeout: 4),
+                   let url = info.url, info.freeTrial != true {
+                    return NeteaseAttempt(officialURL: url)
+                }
+                return NeteaseAttempt()
+            }
+            // 第三档：用户导入的第三方音源（灰歌解锁）。延后 1.5 秒再上路：
+            // 能播的歌基本都在这段时间内被前两档拿下，此时整个 group 已 cancelAll，
+            // 这条子任务还停在 sleep 上就被取消，一次网络请求都不会发出去。
+            if enableUnblock {
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    if Task.isCancelled { return NeteaseAttempt() }
+                    let hit = await UnblockService.resolve(
+                        name: song.name,
+                        artists: song.artists,
+                        neteaseID: song.id,
+                        songSource: .netease,
+                        quality: thirdPartyQuality,
+                        strict: strict,
+                        // 第一档已经拿 pyncmd 试过，不必再打一遍同一个请求。
+                        skipPreferredSource: true
+                    )
+                    return NeteaseAttempt(thirdParty: hit)
+                }
+            }
+            var thirdPartyFallback: UnblockService.Resolved?
+            for await attempt in group {
+                if let hit = attempt.pyncmd {
+                    resolved = UnblockService.Resolved(
+                        url: hit.url,
+                        source: PyncmdSource.sourceTitle,
+                        quality: hit.quality
+                    )
+                    playedByPyncmd = true
+                    group.cancelAll()
+                    break
+                }
+                if let url = attempt.officialURL, officialURL == nil {
+                    officialURL = url
+                    group.cancelAll()
+                    break
+                }
+                if let hit = attempt.thirdParty, thirdPartyFallback == nil {
+                    thirdPartyFallback = hit
+                }
+            }
+            // 走到这里要么上面 break 了（已被前两档拿下），要么所有档位都交卷了。
+            if officialURL == nil, resolved == nil, let hit = thirdPartyFallback {
+                resolved = hit
             }
         }
-        // 官方取址套一层硬预算：`NetEaseAPI` 的会话超时是 20 秒，而灰色 / VIP 歌曲
-        // 在服务端本来就拿不到完整地址 —— 不该让整条顺位链在这一档上干等十几秒。
-        var info = await Self.netEaseOfficialURL(id: song.id, level: quality.level, timeout: 8)
-        if (info?.url == nil || info?.freeTrial == true), quality != .standard {
-            // 高音质拿不到时自动回落到标准音质
-            info = await Self.netEaseOfficialURL(id: song.id, level: "standard", timeout: 8)
-        }
-        BeansLogger.shared.log("网易云解析：\(song.name) 音质=\(quality.level) 官方URL=\(info?.url == nil ? "无" : "有") 试听=\(info?.freeTrial == true ? "是" : "否")", level: .debug)
-        // 试听片段 / 无 URL 一律不直接播放，交给第三方解锁，避免"只能试听"
-        if let u = info?.url, info?.freeTrial != true {
-            urlString = u
-        }
-        if urlString == nil, enableUnblock {
-            resolved = await UnblockService.resolve(
-                name: song.name,
-                artists: song.artists,
-                neteaseID: song.id,
-                songSource: .netease,
-                quality: thirdPartyQuality,
-                strict: strict,
-                // 上面已经试过 pyncmd，这里不必再打一遍同一个必失败的请求。
-                skipPreferredSource: triedPreferredSource
-            )
-        }
-        BeansLogger.shared.log("网易云结果：\(song.name) 官方=\(urlString != nil ? "是" : "否") 第三方=\(resolved != nil ? "命中" : "未用/未命中")", level: .debug)
-        return (urlString, resolved)
+        BeansLogger.shared.log(
+            "网易云结果：\(song.name)｜耗时=\(Int(Date().timeIntervalSince(started) * 1000))ms"
+                + "｜pyncmd=\(playedByPyncmd ? "命中" : "未用")"
+                + "｜官方=\(officialURL == nil ? "无" : "有")"
+                + "｜第三方=\(resolved != nil && !playedByPyncmd ? "命中" : "未用/未命中")",
+            level: .debug
+        )
+        return (officialURL, resolved)
     }
 
     /// QQ 歌曲兜底：官方失败后只走 QQ 第三方接口，不跨平台匹配同名歌曲。
@@ -921,6 +1018,14 @@ final class PlayerManager: NSObject, ObservableObject {
         var media: MFPluginMediaSource?
         var bitrate: Int = 0
         var matchedNeteaseID: Int?
+    }
+
+    /// `neteaseResolve` 并发竞速里某一档的交卷结果。
+    /// 三个字段互斥为「这一档拿到了什么」，全空表示这档没成。
+    private struct NeteaseAttempt: Sendable {
+        var pyncmd: PyncmdResolved?
+        var officialURL: String?
+        var thirdParty: UnblockService.Resolved?
     }
 
     /// 候选一：按歌名+歌手匹配网易云曲目，再用 pyncmd 换高音质直链。
@@ -1500,6 +1605,15 @@ final class PlayerManager: NSObject, ObservableObject {
                     self.duration = seconds
                 }
             }
+            // 接近曲尾时预热下一首的直链。等自动切歌那一刻，pyncmd 这一档就是内存命中，
+            // 不必再从零走一遍网络 —— 这是「一首放完立刻接上下一首」的关键。
+            // 太短的曲目（< 60 秒）跳过：预热请求还没回来歌就结束了，白打一次。
+            if !self.didPrefetchNextAddress,
+               self.duration > 60,
+               time.seconds > self.duration * 0.7 {
+                self.didPrefetchNextAddress = true
+                self.prefetchNextAddress()
+            }
             let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
             if waiting != self.isBuffering {
                 self.isBuffering = waiting
@@ -1507,6 +1621,12 @@ final class PlayerManager: NSObject, ObservableObject {
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             guard let self else { return }
+            // 通知是投递到主队列的，可能「上一首自然播完」的消息刚入队，
+            // 用户这一瞬间已经手动切到了下一首（甚至下下首）。不加这道校验，
+            // 那条迟到的通知会再把队列往前推一首 —— 表现出来就是
+            // 「有时候会莫名其妙跳过一首」。失败回调早就有同样的校验，这里补齐。
+            guard self.player?.currentItem === item,
+                  self.currentSong?.identityKey == loadedSong.identityKey else { return }
             if self.playMode == .repeatOne {
                 self.restartCurrent()
             } else {

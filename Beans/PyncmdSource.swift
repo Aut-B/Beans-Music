@@ -84,18 +84,21 @@ enum PyncmdSource {
         return URLSession(configuration: config)
     }()
 
-    /// 短时缓存：播放失败自动重试时不必再走一次网络。
-    /// 网易云直链带时间戳、有效期约 20 分钟，缓存 60 秒足够安全。
+    /// 内存缓存：播放失败自动重试、以及「预热下一首直链」时不必再走一次网络。
+    ///
+    /// 网易云直链带时间戳、有效期约 20 分钟，缓存 8 分钟仍然安全。
+    /// 原先只有 60 秒 —— 短到「上一首播完自动切下一首」时缓存必然已过期，
+    /// 于是每首歌都要重新请求一遍，等待全落在用户耳朵里。
     private static let cacheLock = NSLock()
     private static var cache: [String: (resolved: PyncmdResolved, at: Date)] = [:]
-    private static let cacheLifetime: TimeInterval = 60
+    private static let cacheLifetime: TimeInterval = 480
 
     /// 按网易云歌曲 id 换直链。失败（无版权、id 无效、网络异常）返回 nil，
     /// 由调用方顺位递进到下一个音源。
     static func mediaURL(
         neteaseID: Int,
         quality: PyncmdQuality = .best,
-        timeout: TimeInterval = 4
+        timeout: TimeInterval = 6
     ) async -> PyncmdResolved? {
         guard neteaseID > 0 else { return nil }
         let cacheKey = "\(neteaseID)|\(quality.rawValue)"
