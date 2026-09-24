@@ -3,6 +3,39 @@ import UIKit
 import PhotosUI
 import UniformTypeIdentifiers
 
+/// 设置页壁纸格子的异步缩略图。
+///
+/// 原实现是在 `body` 里直接 `BeansImageFileCache.image(at:)` —— 那是同步的
+/// `UIImage(contentsOfFile:)`。设置页一展开外观面板，主线程就要把每张壁纸
+/// （一张 1170×2532 解出来约 12 MB）整图解码一遍，张数一多就是几百毫秒的
+/// 白屏。这也是「点开主题就卡」的主要来源。
+///
+/// 现在改为：先在后台把图缩到 320 像素见方再进缓存，格子只做一次廉价的
+/// 尺寸适配；已经解过的直接命中缓存，不会出现占位色闪烁。
+private struct WallpaperThumbnail: View {
+    let path: String
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color.beansGlassFill
+            }
+        }
+        .task(id: path) {
+            if let cached = BeansImageFileCache.cachedImage(at: path) {
+                image = cached
+                return
+            }
+            image = await BeansImageFileCache.thumbnail(at: path, maxPixelSize: 320)
+        }
+    }
+}
+
 /// 自动下载新版 IPA 的结果
 enum DownloadOutcome {
     case success(fileName: String)
@@ -458,15 +491,7 @@ struct ProfileView: View {
                 BeansHaptics.tap()
                 theme.applyWallpaper(at: path)
             } label: {
-                Group {
-                    if let img = BeansImageFileCache.image(at: path) {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Color.beansGlassFill
-                    }
-                }
+                WallpaperThumbnail(path: path)
                 .frame(height: 108)
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -1644,9 +1669,14 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
                 BeansHaptics.select()
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    platformExpanded.toggle()
-                }
+                // 展开动作刻意不再包 `withAnimation`。
+                //
+                // 这一下要同步构建整块折叠内容（平台列表、外观里的多个
+                // Picker/Toggle、壁纸缩略图网格……）。放进动画事务，等于要求
+                // 系统在 0.22 秒里把这些构建全部完成并逐帧插值 —— 帧预算根本
+                // 不够，用户感知就是「设置里每一项点开都必卡一下」。
+                // 内容瞬时出现反而更跟手，视觉上只是少了那点滑入。
+                platformExpanded.toggle()
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "checklist")
@@ -1689,9 +1719,8 @@ struct SettingsView: View {
             // 外观设置行：点击展开 / 收起全部外观设置
             Button {
                 BeansHaptics.select()
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    appearanceExpanded.toggle()
-                }
+                // 见 platformExpanded 处的说明：折叠展开一律不做动画事务。
+                appearanceExpanded.toggle()
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "paintpalette.fill")
@@ -2345,9 +2374,8 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
                 BeansHaptics.select()
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    playbackExpanded.toggle()
-                }
+                // 见 platformExpanded 处的说明：折叠展开一律不做动画事务。
+                playbackExpanded.toggle()
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "play.circle.fill")
@@ -2697,9 +2725,8 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
                 BeansHaptics.select()
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    backupExpanded.toggle()
-                }
+                // 见 platformExpanded 处的说明：折叠展开一律不做动画事务。
+                backupExpanded.toggle()
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "externaldrive.fill")
@@ -3113,15 +3140,7 @@ struct SettingsView: View {
                 BeansHaptics.tap()
                 theme.applyWallpaper(at: path, for: appearance.colorScheme)
             } label: {
-                Group {
-                    if let img = BeansImageFileCache.image(at: path) {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Color.beansGlassFill
-                    }
-                }
+                WallpaperThumbnail(path: path)
                 .frame(height: 108)
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))

@@ -912,8 +912,10 @@ struct AlbumDetailView: View {
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
 
+                        let albumContextKey = "album-\(album.id)"
+                        let _ = PlaybackContextRegistry.shared.register(tracks, key: albumContextKey)
                         ForEach(Array(tracks.enumerated()), id: \.element.identityKey) { index, song in
-                            SongCell(song: song, glassRow: true, playbackContext: tracks, playbackIndex: index) {
+                            SongCell(song: song, glassRow: true, playbackContextKey: albumContextKey, playbackIndex: index) {
                                 player.play(songs: tracks, startAt: index)
                             }
                             .listRowBackground(Color.clear)

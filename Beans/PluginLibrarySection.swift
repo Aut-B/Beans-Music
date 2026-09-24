@@ -16,6 +16,12 @@ struct PluginLibrarySection: View {
     @ObservedObject private var manager = MFPluginManager.shared
     @ObservedObject private var library = LocalLibraryStore.shared
 
+    /// 播放上下文令牌。用「数量 + 首尾条目」做指纹：加载更多时令牌跟着变，
+    /// 而 cell 之间比较的仍然只是一段短字符串。见 `PlaybackContextRegistry`。
+    private var pluginSongsContextKey: String {
+        "plugin-lib-\(songs.count)-\(songs.first?.identityKey ?? "-")-\(songs.last?.identityKey ?? "-")"
+    }
+
     private enum Pane: String, CaseIterable, Identifiable {
         case search = "搜索"
         case charts = "榜单歌单"
@@ -285,11 +291,13 @@ struct PluginLibrarySection: View {
         } else {
             card {
                 VStack(spacing: 0) {
+                    let ctxKey = pluginSongsContextKey
+                    let _ = PlaybackContextRegistry.shared.register(songs, key: ctxKey)
                     ForEach(songs.indices, id: \.self) { index in
                         let song = songs[index]
                         SongCell(
                             song: song,
-                            playbackContext: songs,
+                            playbackContextKey: ctxKey,
                             playbackIndex: index
                         )
                         if index != songs.count - 1 {
@@ -502,6 +510,11 @@ struct PluginSheetDetailView: View {
 
     private var songs: [Song] { items.map { Song(pluginItem: $0) } }
 
+    /// 播放上下文令牌，见 `PlaybackContextRegistry`。
+    private var pluginSongsContextKey: String {
+        "plugin-sheet-\(sheet.id)-\(songs.count)-\(songs.first?.identityKey ?? "-")-\(songs.last?.identityKey ?? "-")"
+    }
+
     var body: some View {
         NavigationView {
             ScrollView {
@@ -609,10 +622,12 @@ struct PluginSheetDetailView: View {
             EmptyStateView(icon: "music.note.list", text: "这个歌单里没有歌曲")
         } else {
             VStack(spacing: 0) {
+                let ctxKey = pluginSongsContextKey
+                let _ = PlaybackContextRegistry.shared.register(songs, key: ctxKey)
                 ForEach(songs.indices, id: \.self) { index in
                     SongCell(
                         song: songs[index],
-                        playbackContext: songs,
+                        playbackContextKey: ctxKey,
                         playbackIndex: index
                     )
                     if index != songs.count - 1 {

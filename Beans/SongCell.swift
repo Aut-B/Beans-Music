@@ -17,7 +17,12 @@ struct SongCell: View {
     var glassRow = false
     /// 需要整体玻璃容器时，单行保持纯净背景
     var suppressNativeCleanRowGlass = false
-    var playbackContext: [Song] = []
+    /// 播放上下文令牌（见 `PlaybackContextRegistry`）。空串表示这一行没有上下文。
+    ///
+    /// 这里刻意**不**直接持有 `[Song]`：那样会让每个 cell 的比较成本变成
+    /// 「整个列表长度」，长歌单滑动时会退化成 O(n²)。令牌是一段短字符串，
+    /// 比较成本恒定。
+    var playbackContextKey: String = ""
     var playbackIndex: Int?
     var onTap: (() -> Void)?
 
@@ -115,8 +120,11 @@ struct SongCell: View {
             }
             if !isCurrent {
                 Button {
-                    if let playbackIndex, !playbackContext.isEmpty {
-                        player.play(songs: playbackContext, startAt: playbackIndex)
+                    if let playbackIndex,
+                       let context = PlaybackContextRegistry.shared.songs(for: playbackContextKey),
+                       !context.isEmpty,
+                       context.indices.contains(playbackIndex) {
+                        player.play(songs: context, startAt: playbackIndex)
                     } else if let index = player.queue.firstIndex(of: song) {
                         player.playQueueIndex(index)
                     } else {

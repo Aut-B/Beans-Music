@@ -15,13 +15,26 @@ enum UnblockService {
         }
     }
 
+    /// 第三方音源大多是自建/公共解析接口，正常 1–3 秒就返回。
+    /// 请求超时给 7 秒时，一个失效音源会**单独拖住整条并发链** ——
+    /// 并发只保证「谁先成功谁赢」，并不能让失败的那条早点交卷。
+    /// 降到 5 秒（资源上限 9 秒）后，最坏等待被压掉近三分之一。
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 7
-        config.timeoutIntervalForResource = 12
+        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForResource = 9
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: config)
     }()
+
+    /// 整条第三方链的总硬预算。
+    ///
+    /// 单个音源内部是「音质档 × 密钥」的串行组合：一个源声明了 3 档音质、
+    /// 配了 2 个密钥时，最坏就是 6 次请求首尾相接 —— 30 秒。用户反馈的
+    /// 「pyncmd 用不了的时候等一首 VIP 歌要大半分钟」正是这一段。
+    /// 超过这个预算无论有没有结果都放弃，改由上层走「失败自动跳下一首」，
+    /// 总好过让用户对着一个转圈的播放键干等。
+    private static let totalBudget: TimeInterval = 8
 
     /// 入口：先试首选音源（pyncmd），再并发尝试用户导入且可用于当前平台的音源，
     /// 返回第一个可用地址。
@@ -103,6 +116,15 @@ enum UnblockService {
         return Resolved(url: hit.url, source: PyncmdSource.sourceTitle, quality: hit.quality)
     }
 
+    /// 并发竞速的单个交卷结果。
+    /// 光有 `Resolved?` 无法区分「这个源没命中」和「整条链超预算了」——
+    /// 前者要继续等别的源，后者必须立刻收工。
+    private enum SourceRaceOutcome: Sendable {
+        case resolved(Resolved)
+        case miss
+        case deadline
+    }
+
     private static func resolveSources(
         _ sources: [ThirdPartySource],
         name: String,
@@ -122,11 +144,12 @@ enum UnblockService {
         let uniqueSources = sources.filter { seen.insert(requestFingerprint(for: $0)).inserted }
 
         // 慢源/失效源不要拖住播放：全部候选一起请求，最快命中的播放地址直接返回。
-        return await withTaskGroup(of: Resolved?.self) { group in
+        // 另挂一个「总预算」哨兵任务，见 `totalBudget` 的说明。
+        return await withTaskGroup(of: SourceRaceOutcome.self) { group in
             for source in uniqueSources {
                 group.addTask {
                     if isScriptSource(source) {
-                        return await scriptSourceRequest(
+                        let hit = await scriptSourceRequest(
                             source: source,
                             name: name,
                             artists: artists,
@@ -138,8 +161,9 @@ enum UnblockService {
                             preferredQuality: quality,
                             excludedHosts: excludedHosts
                         )
+                        return hit.map { SourceRaceOutcome.resolved($0) } ?? .miss
                     }
-                    return await presetSourceRequest(
+                    let hit = await presetSourceRequest(
                         source: source,
                         name: name,
                         artists: artists,
@@ -151,12 +175,27 @@ enum UnblockService {
                         preferredQuality: quality,
                         excludedHosts: excludedHosts
                     )
+                    return hit.map { SourceRaceOutcome.resolved($0) } ?? .miss
                 }
             }
-            for await result in group {
-                if let result {
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(totalBudget * 1_000_000_000))
+                return .deadline
+            }
+            for await outcome in group {
+                switch outcome {
+                case .resolved(let hit):
                     group.cancelAll()
-                    return result
+                    return hit
+                case .deadline:
+                    BeansLogger.shared.log(
+                        "第三方音源整体超出 \(Int(totalBudget)) 秒预算，放弃本轮：\(name)",
+                        level: .warn
+                    )
+                    group.cancelAll()
+                    return nil
+                case .miss:
+                    continue
                 }
             }
             return nil
@@ -364,7 +403,7 @@ enum UnblockService {
         excludedHosts: Set<String>
     ) async -> Resolved? {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 7
+        request.timeoutInterval = 5
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("BeansMusic-UserSource/1.0", forHTTPHeaderField: "User-Agent")
         if let apiKey, !apiKey.isEmpty {

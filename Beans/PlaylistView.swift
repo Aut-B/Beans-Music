@@ -16,12 +16,21 @@ struct PlaylistView: View {
 
     let playlist: Playlist
     @State private var tracks: [Song] = []
+    /// 搜索 + 排序后的结果。
+    ///
+    /// 原先它是个计算属性，body 每重算一次就要跑一遍 filter（O(n)）加 sort
+    /// （O(n log n)）—— 搜索框每敲一个字符都会触发，千首歌单上就是肉眼可见的
+    /// 输入延迟。改为跟着输入源的变化刷新一次。
+    @State private var displayedTracks: [Song] = []
     @State private var loading = true
     @State private var errorMessage: String?
     @State private var searchText = ""
     @State private var sortMode: PlaylistSortMode = .original
     @AppStorage("beans.homeHeaderHideSort") private var hideSortButton = false
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
+
+    /// 播放上下文令牌。整张歌单只登记一份，cell 之间只传这段短字符串。
+    private var playbackContextKey: String { "playlist-\(playlist.source.rawValue)-\(playlist.id)" }
 
     private var isNativeClean: Bool {
         BeansUIStyle(rawValue: uiStyleRaw) == .nativeClean
@@ -54,13 +63,15 @@ struct PlaylistView: View {
                         Task { await load(force: true) }
                     }
                 } else {
+                    let contextKey = playbackContextKey
+                    let _ = PlaybackContextRegistry.shared.register(displayedTracks, key: contextKey)
                     List {
                         header
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
                         Section {
                             ForEach(Array(displayedTracks.enumerated()), id: \.element.identityKey) { index, song in
-                                SongCell(song: song, glassRow: true, playbackContext: displayedTracks, playbackIndex: index) {
+                                SongCell(song: song, glassRow: true, playbackContextKey: contextKey, playbackIndex: index) {
                                     player.play(songs: displayedTracks, startAt: index)
                                 }
                                 .listRowBackground(Color.clear)
@@ -76,6 +87,30 @@ struct PlaylistView: View {
             .navigationTitle(playlist.name)
             .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
+        .onChange(of: tracks) { _ in refreshDisplayedTracks() }
+        .onChange(of: searchText) { _ in refreshDisplayedTracks() }
+        .onChange(of: sortMode) { _ in refreshDisplayedTracks() }
+    }
+
+    /// 重算「搜索 + 排序」结果。只在输入源变化时调用一次，不在 body 里跑。
+    private func refreshDisplayedTracks() {
+        var list = tracks
+        let kw = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !kw.isEmpty {
+            list = list.filter { song in
+                song.name.lowercased().contains(kw)
+                    || song.artists.lowercased().contains(kw)
+                    || song.album.lowercased().contains(kw)
+            }
+        }
+        switch sortMode {
+        case .original: break
+        case .name:
+            list.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        case .duration:
+            list.sort { $0.duration < $1.duration }
+        }
+        displayedTracks = list
     }
 
     private var header: some View {
@@ -151,27 +186,6 @@ struct PlaylistView: View {
         }
         .padding(14)
         .background { BeansSurface(shape: RoundedRectangle(cornerRadius: 24, style: .continuous)) }
-    }
-
-    /// 歌单内搜索 + 排序后的列表
-    private var displayedTracks: [Song] {
-        var list = tracks
-        let kw = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if !kw.isEmpty {
-            list = list.filter { song in
-                song.name.lowercased().contains(kw)
-                    || song.artists.lowercased().contains(kw)
-                    || song.album.lowercased().contains(kw)
-            }
-        }
-        switch sortMode {
-        case .original: break
-        case .name:
-            list.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        case .duration:
-            list.sort { $0.duration < $1.duration }
-        }
-        return list
     }
 
     private func load(force: Bool = false) async {

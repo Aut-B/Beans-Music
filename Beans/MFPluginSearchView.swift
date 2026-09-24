@@ -28,6 +28,11 @@ struct MFPluginSearchView: View {
 
     private var songs: [Song] { items.map { Song(pluginItem: $0) } }
 
+    /// 播放上下文令牌，见 `PlaybackContextRegistry`。
+    private var pluginSongsContextKey: String {
+        "plugin-search-\(platform)-\(songs.count)-\(songs.first?.identityKey ?? "-")-\(songs.last?.identityKey ?? "-")"
+    }
+
     var body: some View {
         NavigationView {
             ScrollView {
@@ -166,11 +171,13 @@ struct MFPluginSearchView: View {
         } else {
             card {
                 VStack(spacing: 0) {
+                    let ctxKey = pluginSongsContextKey
+                    let _ = PlaybackContextRegistry.shared.register(songs, key: ctxKey)
                     ForEach(songs.indices, id: \.self) { index in
                         let song = songs[index]
                         SongCell(
                             song: song,
-                            playbackContext: songs,
+                            playbackContextKey: ctxKey,
                             playbackIndex: index
                         )
                         if index != songs.count - 1 {

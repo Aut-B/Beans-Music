@@ -76,10 +76,13 @@ enum PyncmdError: LocalizedError {
 enum PyncmdSource {
     private static let endpoint = "https://music-api.gdstudio.xyz/api.php"
 
+    /// pyncmd 是一次轻量 GET，实测命中时 1 秒内返回。
+    /// 超时给到 6 秒的唯一效果是：**它不可用时，每一首 VIP 歌都要白等 6 秒**
+    /// 才轮到后面的档位。降到 4 秒，仍然远宽于正常耗时。
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 6
-        config.timeoutIntervalForResource = 8
+        config.timeoutIntervalForRequest = 4
+        config.timeoutIntervalForResource = 6
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: config)
     }()
@@ -98,7 +101,7 @@ enum PyncmdSource {
     static func mediaURL(
         neteaseID: Int,
         quality: PyncmdQuality = .best,
-        timeout: TimeInterval = 6
+        timeout: TimeInterval = 4
     ) async -> PyncmdResolved? {
         guard neteaseID > 0 else { return nil }
         let cacheKey = "\(neteaseID)|\(quality.rawValue)"

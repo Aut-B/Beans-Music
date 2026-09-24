@@ -79,6 +79,13 @@ final class PlayerManager: NSObject, ObservableObject {
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    /// 当前**有效**的媒体 item。
+    ///
+    /// 和 `player?.currentItem` 的区别很关键：重试链路（换第三方地址、降档重试）
+    /// 会重建 AVPlayer 和 item，而 `player` 还可能被 `discardPlayer()` 直接置空。
+    /// 用播放器实例去判「这条播完通知是不是本 item 的」，会把正常播完的通知一起拦掉。
+    /// 用这个独立记录的 item 做判等，既不会被重试误杀，也能拦住迟到通知。
+    private var activeMediaItem: AVPlayerItem?
     private var failureObserver: NSObjectProtocol?
     private var itemStatusObserver: NSKeyValueObservation?
     private var timeControlStatusObserver: NSKeyValueObservation?
@@ -532,6 +539,8 @@ final class PlayerManager: NSObject, ObservableObject {
         qqThirdPartyFallbackSongKey = nil
         // 换歌了，下一首的预取标记跟着重置。
         didPrefetchNextAddress = false
+        // 顺手清掉过期的预热地址，避免字典长期增长。
+        prunePrefetchedAddresses()
         let initialProgress = max(0, min(resumeAt ?? 0, max(song.duration, 0)))
         // 切歌立即「作废」旧播放器，而不是只 pause。
         //
@@ -551,6 +560,33 @@ final class PlayerManager: NSObject, ObservableObject {
         pushHistory(song)
         savePersistedPlaybackState()
         Task {
+            // 预热命中：切歌瞬间直接出声，不必再走一遍顺位链。
+            // 这是「自动切到下一首不再卡住」的关键 —— 取址那几十秒的等待
+            // 已经被上一首剩下的播放时间吸收掉了。
+            let cached: PrefetchedAddress? = await MainActor.run {
+                guard generation == self.loadGeneration else { return nil }
+                return self.takePrefetchedAddress(for: song)
+            }
+            if let cached {
+                await MainActor.run {
+                    guard generation == self.loadGeneration else { return }
+                    let notice = cached.isThirdParty
+                        ? self.thirdPartyVIPNotice(for: song, sourceTitle: cached.sourceTitle ?? "")
+                        : nil
+                    self.setupPlayer(
+                        url: cached.url,
+                        thirdPartyVIPNotice: notice,
+                        resumeAt: initialProgress,
+                        isThirdParty: cached.isThirdParty,
+                        thirdPartyQuality: cached.quality
+                    )
+                }
+                BeansLogger.shared.log(
+                    "使用预热地址播放：\(song.name)｜域名=\(cached.url.host ?? "?")",
+                    level: .info
+                )
+                return
+            }
             var urlString: String?
             var resolvedThirdParty: UnblockService.Resolved?
             var qqOfficialBR: String?
@@ -790,6 +826,49 @@ final class PlayerManager: NSObject, ObservableObject {
     /// - 它是「网易云 id → 直链」的一次轻量 GET，命中率高、代价最低，也是音质最高的那一档；
     /// - 官方接口要带登录 cookie、第三方可能是用户导入的脚本音源，重试代价高得多，
     ///   在「用户未必会听下一首」的前提下不值得提前打。
+    /// 预热好的播放地址。键是歌曲的 `identityKey`。
+    private struct PrefetchedAddress {
+        let url: URL
+        let sourceTitle: String?
+        let quality: ThirdPartyAudioQuality
+        let isThirdParty: Bool
+        let at: Date
+    }
+
+    private var prefetchedAddresses: [String: PrefetchedAddress] = [:]
+    /// 预热结果的有效期。网易云直链本身约 20 分钟有效，但第三方音源给的
+    /// 地址（尤其 QQ CDN 节点）时效短得多，取 3 分钟留足余量。
+    private static let prefetchLifetime: TimeInterval = 180
+
+    /// 取用预热结果 —— **取走即失效**。
+    ///
+    /// 一次性消费是刻意的：一条已作废的直链如果再被下一次重试取到，
+    /// 就会表现成「重试了还是放不出来」，白烧一轮顺位。
+    private func takePrefetchedAddress(for song: Song) -> PrefetchedAddress? {
+        guard let entry = prefetchedAddresses.removeValue(forKey: song.identityKey) else { return nil }
+        guard Date().timeIntervalSince(entry.at) < Self.prefetchLifetime else { return nil }
+        return entry
+    }
+
+    private func prunePrefetchedAddresses() {
+        guard !prefetchedAddresses.isEmpty else { return }
+        let now = Date()
+        prefetchedAddresses = prefetchedAddresses.filter {
+            now.timeIntervalSince($0.value.at) < Self.prefetchLifetime
+        }
+    }
+
+    /// 预取下一首的播放地址。
+    ///
+    /// 「一首放完，下一首要等半天才出声」是用户最直接的抱怨，而等待几乎全花在网络取址上。
+    ///
+    /// 1.15.0 之前这里只预热 pyncmd 那一档 —— 而用户抱怨的恰恰是 **pyncmd 拿不到直链的
+    /// VIP 歌曲**：预热等于没做，切歌时仍要从零走完「官方接口 → 第三方音源」，
+    /// 中间那几十秒的空档就是他看到的「停住了」。
+    ///
+    /// 现在改成完整跑一遍与切歌时相同的顺位链（pyncmd ∥ 官方 ∥ 第三方），
+    /// 把命中结果存下来。用一首歌剩下的 30% 播放时间去换下一首的零等待 ——
+    /// 这一轮请求在切歌时本来也要打，只是提前了。
     private func prefetchNextAddress() {
         guard queue.count > 1 else { return }
         let nextIndex: Int
@@ -803,14 +882,57 @@ final class PlayerManager: NSObject, ObservableObject {
         }
         guard queue.indices.contains(nextIndex) else { return }
         let next = queue[nextIndex]
+        // 只预热网易云：另外几个平台走的是各自独立的官方接口，
+        // 耗时结构与这条链不同，分档规则也不一样，混进来容易误判。
         guard next.source == .netease, next.id > 0 else { return }
-        let targetID = next.id
-        BeansLogger.shared.log("预热下一首直链：\(next.name)｜网易云 id=\(targetID)", level: .debug)
-        Task.detached(priority: .utility) {
-            let preferred = await PreferredSourceStore.currentSnapshot()
-            guard preferred.enabled, preferred.preferForNetease else { return }
-            // 结果不必回传：命中与否都不影响当前这一首，命中时已经进了 `PyncmdSource` 的内存缓存。
-            _ = await PyncmdSource.mediaURL(neteaseID: targetID, quality: preferred.quality)
+        guard prefetchedAddresses[next.identityKey] == nil else { return }
+        let target = next
+        let enableUnblock = externalSourcesEnabled
+        let strict = shouldLockOfficialOnly(target)
+        BeansLogger.shared.log("预热下一首：\(target.name)｜网易云 id=\(target.id)", level: .debug)
+        Task { [weak self] in
+            guard let self else { return }
+            let (officialURL, thirdParty) = await self.neteaseResolve(
+                song: target,
+                quality: BeansAudioQuality.current,
+                thirdPartyQuality: ThirdPartyAudioQuality.current,
+                enableUnblock: enableUnblock,
+                strict: strict
+            )
+            let entry: PrefetchedAddress?
+            if let thirdParty {
+                entry = PrefetchedAddress(
+                    url: thirdParty.url,
+                    sourceTitle: thirdParty.sourceTitle,
+                    quality: thirdParty.quality,
+                    isThirdParty: true,
+                    at: Date()
+                )
+            } else if let officialURL, let url = URL(string: officialURL) {
+                entry = PrefetchedAddress(
+                    url: url,
+                    sourceTitle: nil,
+                    quality: ThirdPartyAudioQuality.current,
+                    isThirdParty: false,
+                    at: Date()
+                )
+            } else {
+                entry = nil
+            }
+            guard let entry else {
+                BeansLogger.shared.log("预热未命中：\(target.name)", level: .debug)
+                return
+            }
+            await MainActor.run {
+                // 同一首歌可能被连续预热两次（进度回调抖动），保留先到的那条即可。
+                if self.prefetchedAddresses[target.identityKey] == nil {
+                    self.prefetchedAddresses[target.identityKey] = entry
+                }
+            }
+            BeansLogger.shared.log(
+                "预热命中：\(target.name)｜域名=\(entry.url.host ?? "?")｜第三方=\(entry.isThirdParty ? "是" : "否")",
+                level: .info
+            )
         }
     }
 
@@ -855,14 +977,17 @@ final class PlayerManager: NSObject, ObservableObject {
             }
             // 第二档：官方接口。两段串行只发生在这条子任务内部，
             // 不影响其他档位 —— 这正是并发竞速的意义。
+            //
+            // 超时从 6/4 收到 4/3：VIP 歌在官方接口这里是**注定拿不到**的
+            // （服务端就不给完整地址），让这条必然失败的支线多占 4 秒毫无意义。
             group.addTask {
-                if let info = await Self.netEaseOfficialURL(id: song.id, level: quality.level, timeout: 6),
+                if let info = await Self.netEaseOfficialURL(id: song.id, level: quality.level, timeout: 4),
                    let url = info.url, info.freeTrial != true {
                     return NeteaseAttempt(officialURL: url)
                 }
                 // 高音质拿不到时自动回落到标准音质
                 if quality != .standard,
-                   let info = await Self.netEaseOfficialURL(id: song.id, level: "standard", timeout: 4),
+                   let info = await Self.netEaseOfficialURL(id: song.id, level: "standard", timeout: 3),
                    let url = info.url, info.freeTrial != true {
                     return NeteaseAttempt(officialURL: url)
                 }
@@ -1484,6 +1609,7 @@ final class PlayerManager: NSObject, ObservableObject {
         player.automaticallyWaitsToMinimizeStalling = false
         player.rate = Float(rate)
         self.player = player
+        self.activeMediaItem = item
         configureEqualizer(for: item)
         playbackConfirmed = false
         itemStatusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -1622,10 +1748,17 @@ final class PlayerManager: NSObject, ObservableObject {
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             guard let self else { return }
             // 通知是投递到主队列的，可能「上一首自然播完」的消息刚入队，
-            // 用户这一瞬间已经手动切到了下一首（甚至下下首）。不加这道校验，
+            // 用户这一瞬间已经手动切到了下一首（甚至下下首）。不加校验的话，
             // 那条迟到的通知会再把队列往前推一首 —— 表现出来就是
-            // 「有时候会莫名其妙跳过一首」。失败回调早就有同样的校验，这里补齐。
-            guard self.player?.currentItem === item,
+            // 「有时候会莫名其妙跳过一首」。
+            //
+            // 但校验条件必须是 `activeMediaItem` 而不是 `player?.currentItem`：
+            // 后者在播放中途发生过任何一次重试（换第三方地址、降档重试）时，
+            // 指向的已经是重建后的新 item，于是同一首正常播完的通知会被判为
+            // 「不是我这条」而**静默丢弃** —— 用户看到的就是「一首放完停住，
+            // 要自己点播放键」。`player` 本身还可能被 `discardPlayer()` 置空，
+            // 那种情况下这条件更是必然失败。
+            guard self.activeMediaItem === item,
                   self.currentSong?.identityKey == loadedSong.identityKey else { return }
             if self.playMode == .repeatOne {
                 self.restartCurrent()
@@ -1739,6 +1872,9 @@ final class PlayerManager: NSObject, ObservableObject {
         player?.pause()
         removeCurrentObservers()
         player = nil
+        // 一并作废「当前媒体 item」的登记：这之后任何一条迟到的播完通知
+        // 都不该再推动队列。
+        activeMediaItem = nil
     }
 
     private func ensurePlaybackAllowed() -> Bool {

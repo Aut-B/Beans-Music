@@ -596,7 +596,9 @@ struct LocalPlaylistDetailSheet: View {
                                         .listRowBackground(Color.clear)
                                         .listRowSeparator(.hidden)
                                     } else {
-                                        SongCell(song: song, glassRow: true, playbackContext: playlist.songs, playbackIndex: index) {
+                                        let ctxKey = "localplaylist-\(playlistID)"
+                                        let _ = PlaybackContextRegistry.shared.register(playlist.songs, key: ctxKey)
+                                        SongCell(song: song, glassRow: true, playbackContextKey: ctxKey, playbackIndex: index) {
                                             player.play(songs: playlist.songs, startAt: index)
                                         }
                                         .listRowBackground(Color.clear)
