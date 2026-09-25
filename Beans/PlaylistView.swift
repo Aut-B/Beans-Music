@@ -91,20 +91,6 @@ struct PlaylistView: View {
         return mine.isEmpty ? list : mine
     }
 
-    /// iOS 26 悬浮底栏的实测行为：系统 tab bar 与迷你播放条 accessory 都**不进**
-    /// pushed 页面的底部安全区（列表、操作条都从 home indicator 排起，直接被压在底下），
-    /// 所以这里按整套底栏的实测高度留位，不做依赖安全区的假设：
-    /// - 展开的 tab bar（带文字）约 76pt + 底部边距 12pt ≈ 88；
-    /// - accessory 迷你播放条约 52pt + 与 tab bar 的间距 8pt，叠上去再加 60 ≈ 148。
-    /// 留多不留少：真机上有零星空隙只是不好看，被盖住是没法用。
-    /// 旧系统（< iOS 26）自绘底栏走 safeAreaInset、已计入安全区，维持 4pt。
-    private var selectionBarBottomPadding: CGFloat {
-        if #available(iOS 26.0, *) {
-            return player.currentSong != nil ? 150 : 90
-        }
-        return 4
-    }
-
     var body: some View {
         let _ = theme.accent
         ZStack {
@@ -117,6 +103,7 @@ struct PlaylistView: View {
                         Task { await load(force: true) }
                     }
                 } else {
+                    ScrollViewReader { proxy in
                     List {
                         header
                             .listRowBackground(Color.clear)
@@ -127,6 +114,22 @@ struct PlaylistView: View {
                                     selectedCount: selectedSongKeys.count,
                                     totalCount: displayedTracks.count,
                                     onToggleAll: toggleSelectAll
+                                )
+                                .id("playlistMultiSelectSummary")
+                            }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            // 操作条与汇总条一起钉在列表顶部：底部悬浮底栏（自绘 tab bar +
+                            // 迷你播放条）在某些机型上不进 pushed 页面的安全区，任何贴底布局
+                            // 都会被整套盖住；放顶部则永远可见可用。
+                            Section {
+                                PlaylistSelectionActionBar(
+                                    selectedCount: selectedSongKeys.count,
+                                    canDelete: canDeleteFromCloud,
+                                    onPlayNext: playSelectedNext,
+                                    onCollect: { showCollectDialog = true },
+                                    onDownload: downloadSelectedSongs,
+                                    onDelete: { showDeleteConfirm = true }
                                 )
                             }
                             .listRowBackground(Color.clear)
@@ -172,19 +175,11 @@ struct PlaylistView: View {
                     }
                     .beansScrollContentBackgroundHidden()
                     .listStyle(.plain)
-                    .safeAreaInset(edge: .bottom) {
-                        if multiSelectMode {
-                            PlaylistSelectionActionBar(
-                                selectedCount: selectedSongKeys.count,
-                                canDelete: canDeleteFromCloud,
-                                onPlayNext: playSelectedNext,
-                                onCollect: { showCollectDialog = true },
-                                onDownload: downloadSelectedSongs,
-                                onDelete: { showDeleteConfirm = true }
-                            )
-                            .padding(.horizontal, 12)
-                            .padding(.bottom, selectionBarBottomPadding)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .onChange(of: multiSelectMode) { active in
+                        // 进入多选时把列表滚回顶部，保证汇总条 + 操作条都在视野内。
+                        guard active else { return }
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            proxy.scrollTo("playlistMultiSelectSummary", anchor: .top)
                         }
                     }
                     // 二次确认挂在 List 上：同一视图节点上叠两个 alert /
@@ -197,6 +192,7 @@ struct PlaylistView: View {
                         }
                     } message: {
                         Text(cloudDeleteConfirmMessage)
+                    }
                     }
                 }
             }

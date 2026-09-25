@@ -48,6 +48,17 @@ enum ChangelogStore {
 
     static let logs: [VersionLog] = [
         VersionLog(
+            id: "1.16.3",
+            version: "1.16.3",
+            title: "多选操作条挪到列表顶部，不再跟底部底栏纠缠",
+            features: [
+                "歌单多选的操作条（下一首播放 / 收藏到歌单 / 下载 / 删除）从屏幕底部挪到列表顶部，紧跟在「已选择 N 项 / 全选」下面：部分机型上底部悬浮底栏不进推入页面的安全区，任何贴底布局都会被整套盖住；钉在页首则永远可见。进入多选时列表会自动滚回顶部，两条都在视野内"
+            ],
+            fixes: [],
+            imageURL: nil,
+            textColorHex: nil
+        ),
+        VersionLog(
             id: "1.16.2",
             version: "1.16.2",
             title: "多选操作栏这次真正挪到迷你播放条上方",
