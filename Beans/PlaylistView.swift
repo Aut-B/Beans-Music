@@ -91,6 +91,14 @@ struct PlaylistView: View {
         return mine.isEmpty ? list : mine
     }
 
+    /// iOS 26 的迷你播放条挂在 tabViewBottomAccessory 上：浮在内容之上、不占安全区，
+    /// 操作条若不自己抬升会被它整个盖住（只露出一条边）。旧系统自绘底栏走的是
+    /// safeAreaInset，已计入安全区，无需额外留空。没有播放中的歌时 accessory 不在，也不留。
+    private var selectionBarBottomPadding: CGFloat {
+        if #available(iOS 26.0, *), player.currentSong != nil { return 62 }
+        return 4
+    }
+
     var body: some View {
         let _ = theme.accent
         ZStack {
@@ -169,7 +177,7 @@ struct PlaylistView: View {
                                 onDelete: { showDeleteConfirm = true }
                             )
                             .padding(.horizontal, 12)
-                            .padding(.bottom, 4)
+                            .padding(.bottom, selectionBarBottomPadding)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                     }

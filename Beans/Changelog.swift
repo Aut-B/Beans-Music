@@ -48,6 +48,17 @@ enum ChangelogStore {
 
     static let logs: [VersionLog] = [
         VersionLog(
+            id: "1.16.1",
+            version: "1.16.1",
+            title: "多选操作栏不再被迷你播放条挡住",
+            features: [],
+            fixes: [
+                "修复 iOS 26 上歌单多选时，底部「下一首播放 / 收藏到歌单 / 下载 / 删除」操作栏被迷你播放条整个盖住的问题：迷你播放条浮在内容之上、不占安全区，现在操作栏会自动抬升到它上方（没有播放歌时不额外留空）"
+            ],
+            imageURL: nil,
+            textColorHex: nil
+        ),
+        VersionLog(
             id: "1.16.0",
             version: "1.16.0",
             title: "歌单能置顶、能批量管理，小屏和老机器更顺",
