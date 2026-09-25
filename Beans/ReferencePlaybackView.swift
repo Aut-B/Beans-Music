@@ -11,6 +11,16 @@ private struct ReferenceLyricCenterKey: PreferenceKey {
 
 private struct ReferencePlaybackPresentationMetrics {
     static let headerTopSpacing: CGFloat = 20
+    /// 小屏（4.7 英寸一代：iPhone 6/6s/7/8/SE）顶部留白收一半，
+    /// 省下来的高度留给底部控制区。
+    static let compactHeaderTopSpacing: CGFloat = 8
+    /// 判定为「小屏」的高度阈值。667pt（6s）及以下都算。
+    static let compactHeightThreshold: CGFloat = 700
+}
+
+/// 是否按小屏排版。
+private func isCompactHeight(_ height: CGFloat) -> Bool {
+    height > 0 && height <= ReferencePlaybackPresentationMetrics.compactHeightThreshold
 }
 
 struct ReferencePlaybackView: View {
@@ -59,7 +69,9 @@ struct ReferencePlaybackView: View {
                 playerBackground
 
                 VStack(spacing: 0) {
-                    Color.clear.frame(height: ReferencePlaybackPresentationMetrics.headerTopSpacing)
+                    Color.clear.frame(height: isCompactHeight(geometry.size.height)
+                        ? ReferencePlaybackPresentationMetrics.compactHeaderTopSpacing
+                        : ReferencePlaybackPresentationMetrics.headerTopSpacing)
 
                     ZStack {
                         if showLyrics {
@@ -76,10 +88,19 @@ struct ReferencePlaybackView: View {
                                 ))
                         }
                     }
+                    // 小屏上歌词内容会把底部控制区顶出可视范围（iPhone 6s 上表现为
+                    // 「切到歌词页就没有音量条」）。这里明确让上方区域可以被压到 0，
+                    // 并把控制区的布局优先级提到最高 —— 空间不够时先牺牲歌词区，
+                    // 而不是牺牲进度条和音量条。
+                    .frame(minHeight: 0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .animation(.easeInOut(duration: 0.22), value: showLyrics)
 
-                    playbackControls(bottomInset: geometry.safeAreaInsets.bottom)
+                    playbackControls(
+                        bottomInset: geometry.safeAreaInsets.bottom,
+                        compact: isCompactHeight(geometry.size.height)
+                    )
+                    .layoutPriority(1)
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
@@ -347,8 +368,8 @@ struct ReferencePlaybackView: View {
         }
     }
 
-    private func playbackControls(bottomInset: CGFloat) -> some View {
-        VStack(spacing: 15) {
+    private func playbackControls(bottomInset: CGFloat, compact: Bool) -> some View {
+        VStack(spacing: compact ? 9 : 15) {
             ReferenceScrubber()
                 .modifier(AppleMusicLayoutTransform(entry: layoutEntry(.progress)))
             HStack(spacing: 28) {
@@ -409,8 +430,8 @@ struct ReferencePlaybackView: View {
             .modifier(AppleMusicLayoutTransform(entry: layoutEntry(.actions)))
         }
         .padding(.horizontal, 24)
-        .padding(.top, 10)
-        .padding(.bottom, max(14, bottomInset + 4))
+        .padding(.top, compact ? 6 : 10)
+        .padding(.bottom, max(compact ? 8 : 14, bottomInset + 4))
         .gesture(commentsGesture)
     }
 
@@ -704,8 +725,15 @@ private struct ReferenceSystemVolumeView: UIViewRepresentable {
     let secondary: Color
 
     func makeUIView(context: Context) -> MPVolumeView {
-        let view = MPVolumeView(frame: .zero)
+        // MPVolumeView 的内部滑杆是在 layout 时按当前 frame 建的：初始 frame 给
+        // .zero 时它可能压根不创建滑杆，表现就是「这一行在，但看不见也拖不动」。
+        // 先给一个真实尺寸，后面的约束由 SwiftUI 的 frame 接管。
+        let view = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 240, height: 32))
         view.showsRouteButton = false
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // 内容吸附优先级拉满：纵向空间紧张时（小屏 + 歌词页）不让系统把这一行压扁。
+        view.setContentCompressionResistancePriority(.required, for: .vertical)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         styleVolumeSlider(in: view)
         return view
     }

@@ -766,9 +766,57 @@ final class NetEaseAPI {
     }
 
     func removeFromPlaylist(playlistID: Int, songIDs: [Int]) async throws -> Bool {
-        let tracks = "[" + songIDs.map(String.init).joined(separator: ",") + "]"
-        let json = try await request("/api/playlist/manipulate/tracks", payload: ["op": "del", "pid": playlistID, "tracks": tracks], crypto: "weapi")
-        return (json["code"] as? Int) == 200
+        let result = await removeFromPlaylistDetailed(playlistID: playlistID, songIDs: songIDs)
+        if !result.ok {
+            throw NetEaseError.unknown(result.message ?? "删除失败")
+        }
+        return true
+    }
+
+    /// 把歌曲从网易云歌单里删掉，返回 (是否成功, 失败原因)。
+    ///
+    /// 删除和加歌走的是同一个 `manipulate/tracks` 接口，协议同样换过好几轮
+    /// （`tracks` / `trackIds` × `weapi` / `eapi`）。这里按加歌那套的顺序
+    /// 全试一遍，谁先回 200 用谁；全失败时把服务端原话带回去 —— 直接显示
+    /// "删除失败"等于把线索掐断，下次还是查不动。
+    func removeFromPlaylistDetailed(playlistID: Int, songIDs: [Int]) async -> (ok: Bool, message: String?) {
+        let idList = songIDs.map(String.init)
+        let jsonArray = "[" + idList.joined(separator: ",") + "]"
+        let path = "/api/playlist/manipulate/tracks"
+        let pid = String(playlistID)
+
+        let attempts: [(label: String, crypto: String, payload: [String: Any])] = [
+            ("weapi/trackIds", "weapi", ["op": "del", "pid": pid, "trackIds": jsonArray, "imme": "true"]),
+            ("eapi/trackIds", "eapi", ["op": "del", "pid": pid, "trackIds": jsonArray, "imme": "true"]),
+            ("weapi/tracks", "weapi", ["op": "del", "pid": pid, "tracks": jsonArray]),
+            ("eapi/tracks", "eapi", ["op": "del", "pid": pid, "tracks": jsonArray]),
+        ]
+
+        var lastMessage: String?
+        for attempt in attempts {
+            do {
+                let json = try await request(path, payload: attempt.payload, crypto: attempt.crypto)
+                let code = json["code"] as? Int ?? -1
+                if code == 200 {
+                    BeansLogger.shared.log("网易云删歌成功［\(attempt.label)］pid=\(playlistID) ids=\(jsonArray)")
+                    return (true, nil)
+                }
+                let raw = json["message"] as? String ?? json["msg"] as? String ?? ""
+                var explain = ""
+                switch code {
+                case 502: explain = "（歌单不是自己的，或歌曲 id 无效）"
+                case 400: explain = "（参数被服务端拒绝）"
+                case 401, 250: explain = "（登录态已失效，重新登录网易云后再试）"
+                default: break
+                }
+                lastMessage = "网易云返回 code=\(code)\(raw.isEmpty ? "" : " \(raw)")\(explain)"
+                BeansLogger.shared.log("网易云删歌失败［\(attempt.label)］pid=\(playlistID) \(lastMessage ?? "")", level: .error)
+            } catch {
+                lastMessage = error.localizedDescription
+                BeansLogger.shared.log("网易云删歌异常［\(attempt.label)］\(error.localizedDescription)", level: .error)
+            }
+        }
+        return (false, lastMessage)
     }
 
     func deletePlaylist(id: Int) async throws -> Bool {

@@ -67,6 +67,8 @@ struct LibraryView: View {
     @ObservedObject private var platformPrefs = PlatformPreferenceStore.shared
     /// 装了插件音源才在平台上露出「插件音源」入口。
     @ObservedObject private var pluginManager = MFPluginManager.shared
+    /// 歌单置顶。放在独立 store 里，不进歌单本体（详见 `PlaylistPinStore`）。
+    @ObservedObject private var pinStore = PlaylistPinStore.shared
 
     @State private var showHistory = false
     @State private var showSectionSort = false
@@ -97,15 +99,31 @@ struct LibraryView: View {
     }
 
     private var orderedNeteasePlaylists: [Playlist] {
-        SyncedPlaylistOrderStore.shared.ordered(auth.playlists, source: .netease)
+        pinStore.pinnedFirst(
+            SyncedPlaylistOrderStore.shared.ordered(auth.playlists, source: .netease)
+        ) { PlaylistPinStore.cloudKey(source: .netease, id: $0.id) }
     }
 
     private var orderedQQPlaylists: [Playlist] {
-        SyncedPlaylistOrderStore.shared.ordered(qqPlaylists, source: .qq)
+        pinStore.pinnedFirst(
+            SyncedPlaylistOrderStore.shared.ordered(qqPlaylists, source: .qq)
+        ) { PlaylistPinStore.cloudKey(source: .qq, id: $0.id) }
     }
 
     private var orderedKugouPlaylists: [Playlist] {
-        SyncedPlaylistOrderStore.shared.ordered(kugouPlaylists, source: .kugou)
+        pinStore.pinnedFirst(
+            SyncedPlaylistOrderStore.shared.ordered(kugouPlaylists, source: .kugou)
+        ) { PlaylistPinStore.cloudKey(source: .kugou, id: $0.id) }
+    }
+
+    private func cloudPinKey(_ playlist: Playlist) -> String {
+        PlaylistPinStore.cloudKey(source: playlist.source, id: playlist.id)
+    }
+
+    private func togglePin(_ playlist: Playlist) {
+        let key = cloudPinKey(playlist)
+        pinStore.toggle(key)
+        ToastCenter.shared.show(pinStore.isPinned(key) ? "已置顶「\(playlist.name)」" : "已取消置顶「\(playlist.name)」")
     }
 
     private var qqCacheAccountID: String {
@@ -414,10 +432,17 @@ struct LibraryView: View {
                             HStack(spacing: 12) {
                                 CoverImage(url: playlist.coverURL, size: 56, cornerRadius: 12)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(playlist.name)
-                                        .font(BeansFont.appFont(15, .medium))
-                                        .foregroundStyle(Color.beansLabel)
-                                        .lineLimit(1)
+                                    HStack(spacing: 5) {
+                                        Text(playlist.name)
+                                            .font(BeansFont.appFont(15, .medium))
+                                            .foregroundStyle(Color.beansLabel)
+                                            .lineLimit(1)
+                                        if pinStore.isPinned(cloudPinKey(playlist)) {
+                                            Image(systemName: "pin.fill")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(Color.beansAmber)
+                                        }
+                                    }
                                     Text(beansSongCountText(playlist.trackCount))
                                         .font(BeansFont.appFont(12))
                                         .foregroundStyle(Color.beansComment)
@@ -433,6 +458,15 @@ struct LibraryView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
+                            Button {
+                                BeansHaptics.tap()
+                                togglePin(playlist)
+                            } label: {
+                                Label(
+                                    pinStore.isPinned(cloudPinKey(playlist)) ? "取消置顶" : "置顶歌单",
+                                    systemImage: pinStore.isPinned(cloudPinKey(playlist)) ? "pin.slash" : "pin"
+                                )
+                            }
                             Button {
                                 BeansHaptics.tap()
                                 requestDelete(playlist)
@@ -628,10 +662,17 @@ struct LibraryView: View {
                             HStack(spacing: 12) {
                                 CoverImage(url: playlist.coverURL, size: 56, cornerRadius: 12)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(playlist.name)
-                                        .font(BeansFont.appFont(15, .medium))
-                                        .foregroundStyle(Color.beansLabel)
-                                        .lineLimit(1)
+                                    HStack(spacing: 5) {
+                                        Text(playlist.name)
+                                            .font(BeansFont.appFont(15, .medium))
+                                            .foregroundStyle(Color.beansLabel)
+                                            .lineLimit(1)
+                                        if pinStore.isPinned(cloudPinKey(playlist)) {
+                                            Image(systemName: "pin.fill")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(Color.beansAmber)
+                                        }
+                                    }
                                     Text(beansSongCountText(playlist.trackCount))
                                         .font(BeansFont.appFont(12))
                                         .foregroundStyle(Color.beansComment)
@@ -647,6 +688,15 @@ struct LibraryView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
+                            Button {
+                                BeansHaptics.tap()
+                                togglePin(playlist)
+                            } label: {
+                                Label(
+                                    pinStore.isPinned(cloudPinKey(playlist)) ? "取消置顶" : "置顶歌单",
+                                    systemImage: pinStore.isPinned(cloudPinKey(playlist)) ? "pin.slash" : "pin"
+                                )
+                            }
                             Button {
                                 BeansHaptics.tap()
                                 requestDelete(playlist)
@@ -685,10 +735,17 @@ struct LibraryView: View {
                             HStack(spacing: 12) {
                                 CoverImage(url: playlist.coverURL, size: 56, cornerRadius: 12)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(playlist.name)
-                                        .font(BeansFont.appFont(15, .medium))
-                                        .foregroundStyle(Color.beansLabel)
-                                        .lineLimit(1)
+                                    HStack(spacing: 5) {
+                                        Text(playlist.name)
+                                            .font(BeansFont.appFont(15, .medium))
+                                            .foregroundStyle(Color.beansLabel)
+                                            .lineLimit(1)
+                                        if pinStore.isPinned(cloudPinKey(playlist)) {
+                                            Image(systemName: "pin.fill")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(Color.beansAmber)
+                                        }
+                                    }
                                     Text(beansSongCountText(playlist.trackCount))
                                         .font(BeansFont.appFont(12))
                                         .foregroundStyle(Color.beansComment)
@@ -703,6 +760,17 @@ struct LibraryView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                BeansHaptics.tap()
+                                togglePin(playlist)
+                            } label: {
+                                Label(
+                                    pinStore.isPinned(cloudPinKey(playlist)) ? "取消置顶" : "置顶歌单",
+                                    systemImage: pinStore.isPinned(cloudPinKey(playlist)) ? "pin.slash" : "pin"
+                                )
+                            }
+                        }
                         Divider().overlay(Color.beansComment.opacity(0.12))
                     }
                 }

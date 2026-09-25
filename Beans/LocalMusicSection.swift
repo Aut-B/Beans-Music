@@ -12,6 +12,8 @@ struct LocalMusicSection: View {
     }
 
     @ObservedObject private var store = LocalLibraryStore.shared
+    /// 歌单置顶（本机显示偏好，不进歌单本体，见 `PlaylistPinStore`）。
+    @ObservedObject private var pinStore = PlaylistPinStore.shared
     /// 区块标题。用字符串传入，是为了让「我的」页面把它整段铺进页面时
     /// 换成「本地歌单」，而音乐库那边仍叫「本地音乐库」—— 同一份实现两处复用。
     var headerTitle: String = "本地音乐库"
@@ -35,6 +37,17 @@ struct LocalMusicSection: View {
     @State private var localBackupURL: URL?
     @State private var showLocalRestorePicker = false
     @State private var localRestoreMessage = ""
+
+    /// 置顶的本地歌单排在前面，其余保持用户在「排序」里排好的顺序。
+    private var displayedPlaylists: [LocalPlaylist] {
+        pinStore.pinnedFirst(store.playlists) { PlaylistPinStore.localKey($0.id) }
+    }
+
+    private func toggleLocalPin(_ playlist: LocalPlaylist) {
+        let key = PlaylistPinStore.localKey(playlist.id)
+        pinStore.toggle(key)
+        ToastCenter.shared.show(pinStore.isPinned(key) ? "已置顶「\(playlist.name)」" : "已取消置顶「\(playlist.name)」")
+    }
 
     private var emptyLocalPlaylistText: String {
         if languageRaw == AppLanguage.english.rawValue {
@@ -110,7 +123,7 @@ struct LocalMusicSection: View {
                 )
             } else {
                 VStack(spacing: 0) {
-                    ForEach(store.playlists) { playlist in
+                    ForEach(displayedPlaylists) { playlist in
                         Button {
                             selected = playlist
                         } label: {
@@ -124,10 +137,17 @@ struct LocalMusicSection: View {
                                         .foregroundStyle(.white)
                                 }
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(playlist.name)
-                                        .font(BeansFont.appFont(15, .medium))
-                                        .foregroundStyle(Color.beansLabel)
-                                        .lineLimit(1)
+                                    HStack(spacing: 5) {
+                                        Text(playlist.name)
+                                            .font(BeansFont.appFont(15, .medium))
+                                            .foregroundStyle(Color.beansLabel)
+                                            .lineLimit(1)
+                                        if pinStore.isPinned(PlaylistPinStore.localKey(playlist.id)) {
+                                            Image(systemName: "pin.fill")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(Color.beansAmber)
+                                        }
+                                    }
                                     Text(beansLocalSongCountText(playlist.songs.count))
                                         .font(BeansFont.appFont(12))
                                         .foregroundStyle(Color.beansComment)
@@ -143,6 +163,15 @@ struct LocalMusicSection: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
+                            Button {
+                                BeansHaptics.tap()
+                                toggleLocalPin(playlist)
+                            } label: {
+                                Label(
+                                    pinStore.isPinned(PlaylistPinStore.localKey(playlist.id)) ? "取消置顶" : "置顶歌单",
+                                    systemImage: pinStore.isPinned(PlaylistPinStore.localKey(playlist.id)) ? "pin.slash" : "pin"
+                                )
+                            }
                             Button {
                                 store.movePlaylist(id: playlist.id, offset: -1)
                             } label: {
@@ -508,21 +537,42 @@ struct LocalPlaylistDetailSheet: View {
     @State private var editMode: EditMode = .inactive
     @State private var selectedSongKeys: Set<String> = []
     @State private var showAddSelectedDestination = false
+    @State private var showDeleteConfirm = false
+    @State private var downloading = false
+    /// 搜索结果。原先它是个计算属性：body 每重算一次就要 `enumerated()` 一遍
+    /// （给几百首歌各包一个元组）再 filter —— 搜索框每敲一个字符都要付一次，
+    /// 长歌单上就是肉眼可见的卡顿。改成跟着输入源变化刷新一次。
+    @State private var visibleSongs: [(offset: Int, element: Song)] = []
 
     private var playlist: LocalPlaylist? {
         store.playlists.first { $0.id == playlistID }
     }
 
-    private var visibleSongs: [(offset: Int, element: Song)] {
-        guard let playlist else { return [] }
+    /// 播放上下文令牌。整张歌单只登记一份，cell 之间只传这段短字符串。
+    private var playbackContextKey: String { "localplaylist-\(playlistID.uuidString)" }
+
+    /// 重算搜索结果并顺手刷新播放上下文。
+    ///
+    /// 登记上下文这一步原本写在 `ForEach` 的每一行里 —— 那等于每渲染一行就把
+    /// 整张歌单（几百首 `Song`）往注册表里写一遍，滑动时是持续的 O(n²) 写入。
+    /// 挪到这里之后只在数据/搜索词变化时做一次。
+    private func refreshVisibleSongs() {
+        guard let playlist else {
+            visibleSongs = []
+            return
+        }
+        PlaybackContextRegistry.shared.register(playlist.songs, key: playbackContextKey)
         let keyword = playlistSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let songs = Array(playlist.songs.enumerated())
-        guard !keyword.isEmpty else { return songs }
-        return songs.filter { _, song in
-            song.name.lowercased().contains(keyword)
-                || song.artists.lowercased().contains(keyword)
-                || song.album.lowercased().contains(keyword)
+        guard keyword.isEmpty else {
+            visibleSongs = songs.filter { _, song in
+                song.name.lowercased().contains(keyword)
+                    || song.artists.lowercased().contains(keyword)
+                    || song.album.lowercased().contains(keyword)
+            }
+            return
         }
+        visibleSongs = songs
     }
 
     /// 排序模式且未在搜索时才允许拖动：搜索结果是子集，
@@ -573,6 +623,17 @@ struct LocalPlaylistDetailSheet: View {
                             }
                         }
                         .listRowBackground(Color.clear)
+                        if multiSelectMode {
+                            Section {
+                                PlaylistSelectionSummaryBar(
+                                    selectedCount: selectedSongKeys.count,
+                                    totalCount: visibleSongs.count,
+                                    onToggleAll: toggleSelectAll
+                                )
+                            }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                        }
                         Section {
                             if visibleSongs.isEmpty {
                                 EmptyStateView(icon: "magnifyingglass", text: "没有找到匹配歌曲")
@@ -596,9 +657,7 @@ struct LocalPlaylistDetailSheet: View {
                                         .listRowBackground(Color.clear)
                                         .listRowSeparator(.hidden)
                                     } else {
-                                        let ctxKey = "localplaylist-\(playlistID)"
-                                        let _ = PlaybackContextRegistry.shared.register(playlist.songs, key: ctxKey)
-                                        SongCell(song: song, glassRow: true, playbackContextKey: ctxKey, playbackIndex: index) {
+                                        SongCell(song: song, glassRow: true, playbackContextKey: playbackContextKey, playbackIndex: index) {
                                             player.play(songs: playlist.songs, startAt: index)
                                         }
                                         .listRowBackground(Color.clear)
@@ -629,6 +688,29 @@ struct LocalPlaylistDetailSheet: View {
                     .listStyle(.plain)
                     .environment(\.editMode, $editMode)
                     .searchable(text: $playlistSearchText, placement: .navigationBarDrawer(displayMode: .always), prompt: LocalizedStringKey("搜索本地歌单歌曲"))
+                    .safeAreaInset(edge: .bottom) {
+                        if multiSelectMode {
+                            PlaylistSelectionActionBar(
+                                selectedCount: selectedSongKeys.count,
+                                canDelete: true,
+                                onPlayNext: playSelectedNext,
+                                onCollect: { showAddSelectedDestination = true },
+                                onDownload: downloadSelectedSongs,
+                                onDelete: { showDeleteConfirm = true }
+                            )
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 4)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                    }
+                    // 二次确认挂在 List 上而不是整张 sheet：外层已经有一个
+                    // 「重命名歌单」的 alert，同挂一处只会有一个能弹出来。
+                    .alert("移除选中歌曲", isPresented: $showDeleteConfirm) {
+                        Button("移除", role: .destructive) { removeSelectedSongs() }
+                        Button("取消", role: .cancel) {}
+                    } message: {
+                        Text(localDeleteConfirmMessage)
+                    }
                 } else {
                     EmptyStateView(icon: "music.note.list", text: "歌单不存在或已删除")
                 }
@@ -639,6 +721,20 @@ struct LocalPlaylistDetailSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("完成") { dismiss() }
+                }
+                // 多选做成一步直达的独立按钮：埋在「⋯」菜单里要点两下，
+                // 用户根本不会去找。菜单里仍保留一份作为兜底路径。
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        BeansHaptics.tap()
+                        multiSelectMode.toggle()
+                        if multiSelectMode { editMode = .inactive }
+                        if !multiSelectMode { selectedSongKeys.removeAll() }
+                    } label: {
+                        Image(systemName: multiSelectMode ? "xmark.circle" : "checklist")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    .accessibilityLabel(multiSelectToggleLabel)
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
@@ -737,10 +833,69 @@ struct LocalPlaylistDetailSheet: View {
             Text("已选歌曲会复制到目标歌单，当前歌单中的歌曲不会被移除。")
         }
         .modifier(BeansSheetModifier(detents: [.medium, .large], dragIndicator: true))
+        .onAppear { refreshVisibleSongs() }
+        .onChange(of: store.playlists) { _ in refreshVisibleSongs() }
+        .onChange(of: playlistSearchText) { _ in refreshVisibleSongs() }
     }
 
     private var hasOtherPlaylist: Bool {
         store.playlists.contains { $0.id != playlistID }
+    }
+
+    /// 多选按钮的无障碍标签。抽成 `String` 属性，避免两个字符串字面量的三元式
+    /// 在 `Text`-类 init 之间撞出重载歧义。
+    private var multiSelectToggleLabel: String {
+        multiSelectMode ? "退出多选" : "多选编辑"
+    }
+
+    private var localDeleteConfirmMessage: String {
+        "将从「\(playlist?.name ?? "本地歌单")」移除选中的 \(selectedSongKeys.count) 首歌曲，此操作不可撤销。"
+    }
+
+    /// 全选 / 取消全选只作用于当前搜索出来的结果，
+    /// 免得用户在搜索状态下点「全选」把没搜到的歌一起选上。
+    private func toggleSelectAll() {
+        BeansHaptics.select()
+        let keys = Set(visibleSongs.map(\.element.identityKey))
+        guard !keys.isEmpty else { return }
+        if keys.isSubset(of: selectedSongKeys) {
+            selectedSongKeys.subtract(keys)
+        } else {
+            selectedSongKeys.formUnion(keys)
+        }
+    }
+
+    /// 选中的歌曲按歌单里的顺序插到播放队列的下一首位置。
+    private func playSelectedNext() {
+        guard let playlist, !selectedSongKeys.isEmpty else { return }
+        let picked = playlist.songs.filter { selectedSongKeys.contains($0.identityKey) }
+        guard !picked.isEmpty else { return }
+        for song in picked { player.playNext(song) }
+        BeansHaptics.success()
+        ToastCenter.shared.show("已把 \(picked.count) 首歌曲排到下一首")
+        selectedSongKeys.removeAll()
+        multiSelectMode = false
+    }
+
+    @MainActor
+    private func downloadSelectedSongs() {
+        guard let playlist, !selectedSongKeys.isEmpty, !downloading else { return }
+        let picked = playlist.songs.filter { selectedSongKeys.contains($0.identityKey) }
+        guard !picked.isEmpty else { return }
+        downloading = true
+        selectedSongKeys.removeAll()
+        multiSelectMode = false
+        ToastCenter.shared.show("开始下载 \(picked.count) 首歌曲")
+        Task {
+            var success = 0
+            for song in picked {
+                let result = await DownloadManager.shared.download(song: song, quality: ThirdPartyAudioQuality.current)
+                if case .success = result { success += 1 }
+            }
+            downloading = false
+            BeansHaptics.success()
+            ToastCenter.shared.show("下载完成：\(success)/\(picked.count) 首", duration: 3)
+        }
     }
 
     private func toggleSelection(_ song: Song) {
