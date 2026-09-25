@@ -48,6 +48,17 @@ enum ChangelogStore {
 
     static let logs: [VersionLog] = [
         VersionLog(
+            id: "1.16.2",
+            version: "1.16.2",
+            title: "多选操作栏这次真正挪到迷你播放条上方",
+            features: [],
+            fixes: [
+                "上一版对 iOS 26 悬浮底栏的抬升量不够：实测系统 tab bar 和迷你播放条都不占用 pushed 页面的安全区，操作栏被整套压住。这次直接按整套底栏的实测高度留位（无歌在播约 90pt，有歌在播约 150pt），保证操作栏永远落在它们上方"
+            ],
+            imageURL: nil,
+            textColorHex: nil
+        ),
+        VersionLog(
             id: "1.16.1",
             version: "1.16.1",
             title: "多选操作栏不再被迷你播放条挡住",

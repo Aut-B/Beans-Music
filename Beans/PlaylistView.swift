@@ -91,11 +91,17 @@ struct PlaylistView: View {
         return mine.isEmpty ? list : mine
     }
 
-    /// iOS 26 的迷你播放条挂在 tabViewBottomAccessory 上：浮在内容之上、不占安全区，
-    /// 操作条若不自己抬升会被它整个盖住（只露出一条边）。旧系统自绘底栏走的是
-    /// safeAreaInset，已计入安全区，无需额外留空。没有播放中的歌时 accessory 不在，也不留。
+    /// iOS 26 悬浮底栏的实测行为：系统 tab bar 与迷你播放条 accessory 都**不进**
+    /// pushed 页面的底部安全区（列表、操作条都从 home indicator 排起，直接被压在底下），
+    /// 所以这里按整套底栏的实测高度留位，不做依赖安全区的假设：
+    /// - 展开的 tab bar（带文字）约 76pt + 底部边距 12pt ≈ 88；
+    /// - accessory 迷你播放条约 52pt + 与 tab bar 的间距 8pt，叠上去再加 60 ≈ 148。
+    /// 留多不留少：真机上有零星空隙只是不好看，被盖住是没法用。
+    /// 旧系统（< iOS 26）自绘底栏走 safeAreaInset、已计入安全区，维持 4pt。
     private var selectionBarBottomPadding: CGFloat {
-        if #available(iOS 26.0, *), player.currentSong != nil { return 62 }
+        if #available(iOS 26.0, *) {
+            return player.currentSong != nil ? 150 : 90
+        }
         return 4
     }
 
