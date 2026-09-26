@@ -58,6 +58,8 @@ struct ProfileView: View {
     /// 统一账号登录面板（网易云 + QQ 音乐整合）
     @State private var showAccountHub = false    /// 设置页（外观 + 歌词翻译等）
     @State private var showSettings = false
+    /// 「插件音源」搜歌页（我的页入口卡片展开）
+    @State private var showPluginSourceLibrary = false
     @State private var showSectionSort = false
     /// 我的界面板块顺序（账号 / 关于，可自定义）
     @State private var profileOrder = SectionOrderStore.load(SectionOrderStore.profileKey, defaults: SectionOrderStore.profileDefaults)
@@ -215,6 +217,8 @@ struct ProfileView: View {
                         switch key {
                         case "账号":
                             userCard
+                        case "插件音源":
+                            pluginSourceEntry
                         case "本地歌单":
                             localPlaylistsSection
                         case "关于":
@@ -265,6 +269,30 @@ struct ProfileView: View {
             AccountHubSheet()
                 .environmentObject(auth)
                 .environmentObject(theme)
+        }
+        .sheet(isPresented: $showPluginSourceLibrary) {
+            BeansNavigationStack {
+                ScrollView {
+                    PluginLibrarySection()
+                        .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                        .padding(.bottom, 28)
+                }
+                .beansScrollIndicatorsHidden()
+                .background {
+                    GlassBackdrop()
+                }
+                .navigationTitle("插件音源")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("完成") { showPluginSourceLibrary = false }
+                    }
+                }
+            }
+            .environmentObject(theme)
+            .environmentObject(player)
+            .environmentObject(auth)
         }
         .fullScreenCover(isPresented: $showSettings) {
             SettingsView()
@@ -440,6 +468,61 @@ struct ProfileView: View {
     /// 两处不会各维护一套逻辑。
     private var localPlaylistsSection: some View {
         LocalMusicSection(headerTitle: "本地歌单")
+    }
+
+    /// 「插件音源」入口（MusicFree 插件，哔哩哔哩等）。
+    ///
+    /// 原先只能从音乐库顶部的平台切换里进，而且**装了插件才显示**——
+    /// 沙盒数据被重置后插件清空，入口跟着消失，用户连重导插件的地方都找不到。
+    /// 现在这张卡片常驻「我的」页面、本地歌单上方，点开就是搜歌页；
+    /// 没装插件时进去能看到空态提示和「管理」入口，补回插件不用翻二级菜单。
+    private var pluginSourceEntry: some View {
+        Button {
+            BeansHaptics.tap()
+            showPluginSourceLibrary = true
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(LinearGradient(colors: [Color.beansAmber.opacity(0.75), Color.beansAmber.opacity(0.35)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 48, height: 48)
+                    Image(systemName: "puzzlepiece.extension.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(beansLocalized("插件音源", "Plugin Sources"))
+                        .font(BeansFont.appFont(15, .medium))
+                        .foregroundStyle(Color.beansLabel)
+                    Text(pluginSourceEntrySubtitle)
+                        .font(BeansFont.appFont(12))
+                        .foregroundStyle(Color.beansComment)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.beansComment.opacity(0.6))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background {
+                BeansGlass(shape: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+            .beansCardShadow(radius: 10, y: 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var pluginSourceEntrySubtitle: String {
+        if pluginManager.plugins.isEmpty {
+            return beansLocalized("哔哩哔哩等 MusicFree 音源，点进来添加", "Tap to add MusicFree sources")
+        }
+        return beansLocalized(
+            "\(pluginManager.plugins.count) 个音源：搜歌、榜单、歌单导入",
+            "\(pluginManager.plugins.count) sources: search, charts, import"
+        )
     }
 
     /// 每个登录平台单独展示登录成功状态（网易云 / QQ 音乐）

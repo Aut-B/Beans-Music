@@ -12,7 +12,7 @@ enum SectionOrderStore {
     /// 主页板块默认顺序
     static let homeDefaults = ["每日推荐", "排行榜", "歌单广场"]
     /// 我的界面板块默认顺序
-    static let profileDefaults = ["账号", "本地歌单", "关于"]
+    static let profileDefaults = ["账号", "插件音源", "本地歌单", "关于"]
 
     /// 读取已保存顺序：自动补全新板块、剔除已废弃板块
     static func load(_ key: String, defaults: [String]) -> [String] {
@@ -30,6 +30,13 @@ enum SectionOrderStore {
             if !order.contains("本地歌单") {
                 let anchor = order.firstIndex(of: "账号").map { $0 + 1 } ?? 0
                 order.insert("本地歌单", at: min(anchor, order.count))
+            }
+            // 「插件音源」入口同理：老用户顺序里没有它，插到「本地歌单」之前。
+            if !order.contains("插件音源") {
+                let anchor = order.firstIndex(of: "本地歌单")
+                    ?? order.firstIndex(of: "账号").map { $0 + 1 }
+                    ?? 0
+                order.insert("插件音源", at: min(anchor, order.count))
             }
         }
         for item in defaults where !order.contains(item) { order.append(item) }
