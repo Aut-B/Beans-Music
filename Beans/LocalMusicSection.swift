@@ -607,6 +607,7 @@ struct LocalPlaylistDetailSheet: View {
                 GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
                 Group {
                 if let playlist {
+                    ScrollViewReader { proxy in
                     List {
                         Section {
                             HStack(spacing: 12) {
@@ -629,6 +630,21 @@ struct LocalPlaylistDetailSheet: View {
                                     selectedCount: selectedSongKeys.count,
                                     totalCount: visibleSongs.count,
                                     onToggleAll: toggleSelectAll
+                                )
+                                .id("localPlaylistMultiSelectSummary")
+                            }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            // 操作条与汇总条一起钉在列表顶部，与网易云歌单页（1.16.3）同一套
+                            // 处理：贴底布局会被列表行压住、点不到，放页首永远可见可用。
+                            Section {
+                                PlaylistSelectionActionBar(
+                                    selectedCount: selectedSongKeys.count,
+                                    canDelete: true,
+                                    onPlayNext: playSelectedNext,
+                                    onCollect: { showAddSelectedDestination = true },
+                                    onDownload: downloadSelectedSongs,
+                                    onDelete: { showDeleteConfirm = true }
                                 )
                             }
                             .listRowBackground(Color.clear)
@@ -688,19 +704,11 @@ struct LocalPlaylistDetailSheet: View {
                     .listStyle(.plain)
                     .environment(\.editMode, $editMode)
                     .searchable(text: $playlistSearchText, placement: .navigationBarDrawer(displayMode: .always), prompt: LocalizedStringKey("搜索本地歌单歌曲"))
-                    .safeAreaInset(edge: .bottom) {
-                        if multiSelectMode {
-                            PlaylistSelectionActionBar(
-                                selectedCount: selectedSongKeys.count,
-                                canDelete: true,
-                                onPlayNext: playSelectedNext,
-                                onCollect: { showAddSelectedDestination = true },
-                                onDownload: downloadSelectedSongs,
-                                onDelete: { showDeleteConfirm = true }
-                            )
-                            .padding(.horizontal, 12)
-                            .padding(.bottom, 4)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .onChange(of: multiSelectMode) { active in
+                        // 进入多选时滚回顶部，保证汇总条 + 操作条都在视野内。
+                        guard active else { return }
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            proxy.scrollTo("localPlaylistMultiSelectSummary", anchor: .top)
                         }
                     }
                     // 二次确认挂在 List 上而不是整张 sheet：外层已经有一个
@@ -710,6 +718,7 @@ struct LocalPlaylistDetailSheet: View {
                         Button("取消", role: .cancel) {}
                     } message: {
                         Text(localDeleteConfirmMessage)
+                    }
                     }
                 } else {
                     EmptyStateView(icon: "music.note.list", text: "歌单不存在或已删除")

@@ -48,6 +48,17 @@ enum ChangelogStore {
 
     static let logs: [VersionLog] = [
         VersionLog(
+            id: "1.16.5",
+            version: "1.16.5",
+            title: "本地歌单多选的操作条也挪到列表顶部",
+            features: [
+                "本地歌单多选时，「下一首播放 / 收藏到歌单 / 下载 / 删除」操作条从屏幕底部挪到列表顶部，紧跟「已选择 N 项 / 全选」下面——底部那条会被列表行压住、点不中。进入多选时列表自动滚回顶部，与网易云歌单页（1.16.3）同一套处理"
+            ],
+            fixes: [],
+            imageURL: nil,
+            textColorHex: nil
+        ),
+        VersionLog(
             id: "1.16.4",
             version: "1.16.4",
             title: "插件音源入口常驻「我的」页，搜 B 站歌不用翻菜单",
